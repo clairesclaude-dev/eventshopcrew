@@ -1,0 +1,18 @@
+-- ============================================================================
+-- EventShop Crew Portal — no-overlap claiming (2026-07-20)
+-- ----------------------------------------------------------------------------
+-- Crew can't claim a shift that clashes in time with a shift they already hold
+-- (any event). Non-overlapping shifts are fine, even in the same event. Applies
+-- to self-claims (claim_shift) and accepted hand-offs (accept_shift_trade).
+-- Idempotent (CREATE OR REPLACE). See the deployed function bodies in the
+-- Supabase project for the authoritative version applied on 2026-07-20.
+-- ============================================================================
+-- The overlap test used in both functions:
+--   new.starts_at < existing.ends_at AND existing.starts_at < new.ends_at
+-- (only enforced when both shifts have a start and an end time)
+--
+-- This migration was applied to the live project via the Supabase API. The full
+-- CREATE OR REPLACE definitions for public.claim_shift(uuid) and
+-- public.accept_shift_trade(uuid) live in 20260719_shifts_upgrade.sql with the
+-- clash guard added; re-running that file plus this note keeps parity.
+-- ============================================================================

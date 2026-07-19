@@ -6,6 +6,7 @@ import {
   MapPin, ChevronRight, ChevronLeft, ChevronDown, Loader2, Megaphone, UserPlus, Download, Trash2, Settings, KeyRound, Mail,
   MessageCircle, HelpCircle, Send, AlertTriangle, Receipt,
   CalendarPlus, CalendarDays, ArrowLeftRight, Play, Square, Timer, User, Ban, Info, Repeat, List,
+  ArrowUp, ArrowDown, Copy, ArrowDownUp, Filter, Shirt, Tag,
 } from "lucide-react";
 import QRCode from "qrcode";
 import { supabase } from "./supabaseClient.js";
@@ -36,6 +37,146 @@ const liveDur = (startIso, endIso) => {
   return `${hh}:${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
 };
 const dayKey = (d) => { const x = new Date(d); x.setHours(0, 0, 0, 0); return x.toISOString().slice(0, 10); };
+
+// Always prefer a real name; fall back to email only if there's no name on file.
+const nameOf = (p) => (p && (String(p.full_name || "").trim() || p.email)) || "Unknown";
+
+// hours between two datetime values (ISO or datetime-local strings)
+const hoursBetween = (a, b) => {
+  if (!a || !b) return null;
+  const ms = new Date(b) - new Date(a);
+  if (isNaN(ms) || ms <= 0) return null;
+  return ms / 3600000;
+};
+
+// Little green "= 4h 30m" chip that updates live as you set start/end times.
+function DurationHint({ start, end, className = "" }) {
+  const h = hoursBetween(start, end);
+  if (h == null) return null;
+  return (
+    <span className={`inline-flex items-center gap-1 text-xs font-bold text-forest bg-forest/10 rounded-md px-2 py-0.5 whitespace-nowrap ${className}`}>
+      <Timer className="w-3 h-3" /> {fmtDur(h)}
+    </span>
+  );
+}
+
+// Friendly date + time entry. Calendar for the date; TYPE the time (no scroll
+// wheel); AM/PM are two big highlighted buttons so they can't get flipped.
+// value/onChange use a datetime-local string ("YYYY-MM-DDTHH:MM"); "" clears.
+function DateTimeField({ value, onChange }) {
+  const parse = (v) => {
+    if (!v) return { date: "", t: "", ap: "PM" };
+    const d = new Date(v);
+    if (isNaN(d)) return { date: "", t: "", ap: "PM" };
+    const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    let h = d.getHours(); const m = d.getMinutes();
+    const ap = h >= 12 ? "PM" : "AM";
+    let h12 = h % 12; if (h12 === 0) h12 = 12;
+    return { date, t: `${h12}:${String(m).padStart(2, "0")}`, ap };
+  };
+  const init = useState(() => parse(value))[0];
+  const [date, setDate] = useState(init.date);
+  const [t, setT] = useState(init.t);
+  const [ap, setAp] = useState(init.ap);
+
+  const parseTime = (str) => {
+    const c = String(str ?? "").replace(/[^\d:]/g, "");
+    if (!c) return null;
+    let h, m;
+    if (c.includes(":")) { const [a, b] = c.split(":"); h = parseInt(a || "0", 10); m = parseInt((b || "").padEnd(2, "0").slice(0, 2), 10); }
+    else if (c.length <= 2) { h = parseInt(c, 10); m = 0; }
+    else { h = parseInt(c.slice(0, c.length - 2), 10); m = parseInt(c.slice(-2), 10); }
+    if (isNaN(h)) return null;
+    return { h, m: isNaN(m) ? 0 : Math.min(59, m) };
+  };
+  const emit = (d2, t2, ap2) => {
+    const pt = parseTime(t2);
+    if (!d2 || !pt) { onChange(""); return; }
+    let h12 = pt.h, apf = ap2;
+    if (h12 >= 13 && h12 <= 23) { apf = "PM"; h12 -= 12; }   // they typed 24-hour
+    else if (h12 === 0) { apf = "AM"; h12 = 12; }
+    const h24 = apf === "PM" ? (h12 === 12 ? 12 : h12 + 12) : (h12 === 12 ? 0 : h12);
+    // interpret what they typed as LOCAL wall-clock, store a proper ISO instant,
+    // so admin and crew always see the same correct time in their own zone.
+    const dt = new Date(`${d2}T${String(h24).padStart(2, "0")}:${String(pt.m).padStart(2, "0")}`);
+    onChange(isNaN(dt) ? "" : dt.toISOString());
+  };
+  const onTimeBlur = () => {
+    const pt = parseTime(t);
+    if (!pt) { setT(""); emit(date, "", ap); return; }
+    let h12 = pt.h, apf = ap;
+    if (h12 >= 13 && h12 <= 23) { apf = "PM"; h12 -= 12; setAp("PM"); }
+    else if (h12 === 0) { apf = "AM"; h12 = 12; setAp("AM"); }
+    const norm = `${h12}:${String(pt.m).padStart(2, "0")}`;
+    setT(norm); emit(date, norm, apf);
+  };
+
+  return (
+    <div className="flex flex-wrap items-stretch gap-1.5">
+      <input type="date" value={date} onChange={(e) => { setDate(e.target.value); emit(e.target.value, t, ap); }}
+        className="flex-1 min-w-[8.5rem] border border-ink/20 rounded-lg px-2 py-2 outline-none focus:border-ink" />
+      <input inputMode="numeric" placeholder="5:30" value={t} aria-label="Time"
+        onChange={(e) => setT(e.target.value)} onBlur={onTimeBlur}
+        className="w-16 text-center border border-ink/20 rounded-lg px-1 py-2 outline-none focus:border-ink" />
+      <div className="inline-flex rounded-lg overflow-hidden border border-ink/20 shrink-0">
+        {["AM", "PM"].map((x) => (
+          <button key={x} type="button" onClick={() => { setAp(x); emit(date, t, x); }}
+            className={`px-3 py-2 text-sm font-bold transition ${ap === x ? "bg-ink text-white" : "bg-white text-ink/45 hover:bg-ink/5"}`}>{x}</button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ---- Email rendering (templates are editable from the admin Emails screen) --
+const emailVars = (p) => ({
+  name: p.name || "there",
+  role: p.roleTitle || "",
+  event: p.eventName || "",
+  when: [p.date, p.time].filter(Boolean).join(" · "),
+  where: p.location || "",
+  from: p.from || "a teammate",
+});
+const fillTemplate = (str, vars) =>
+  String(str || "").replace(/\{(\w+)\}/g, (m, k) => (k in vars ? vars[k] : m));
+const escEmail = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+
+// Wrap the admin's plain-text body in the branded EventShop email shell.
+function emailBodyToHtml(text) {
+  const paras = String(text || "").trim().split(/\n\s*\n/)
+    .map((p) => `<p style="margin:0 0 14px;">${escEmail(p).replace(/\n/g, "<br>")}</p>`).join("");
+  return `<!doctype html><html><body style="margin:0;background:#f4f4f5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#0B0B0B;">`
+    + `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f5;padding:24px 12px;"><tr><td align="center">`
+    + `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;background:#fff;border-radius:18px;overflow:hidden;border:1px solid #eee;">`
+    + `<tr><td style="background:#0B0B0B;padding:18px 24px;"><span style="color:#F6D22C;font-weight:900;font-size:20px;">EVENTSHOP</span><span style="color:#fff;font-weight:700;font-size:20px;"> CREW</span></td></tr>`
+    + `<tr><td style="padding:24px 24px 6px;font-size:16px;line-height:1.6;color:#27272a;">${paras}`
+    + `<p style="margin:8px 0 4px;"><a href="https://eventshopcrew.com" style="display:inline-block;background:#F6D22C;color:#0B0B0B;font-weight:800;text-decoration:none;padding:12px 20px;border-radius:12px;">Open the portal →</a></p></td></tr>`
+    + `<tr><td style="padding:16px 24px 24px;color:#a1a1aa;font-size:13px;border-top:1px solid #f0f0f0;">Questions? Just reply to this email. 💛<br>EventShop · Knoxville</td></tr>`
+    + `</table></td></tr></table></body></html>`;
+}
+
+// Best-effort transactional email: render the editable template, send via the
+// Edge Function, and record it in the email log. Never blocks the action.
+async function sendPortalEmail(kind, payload) {
+  try {
+    if (!payload?.to) return;
+    const { data: tmpl } = await supabase.from("email_templates").select("*").eq("kind", kind).maybeSingle();
+    if (!tmpl || tmpl.enabled === false) {
+      await supabase.from("email_log").insert({ kind, to_email: payload.to, subject: tmpl?.subject || "", status: "skipped", detail: tmpl ? "turned off" : "no template" });
+      return;
+    }
+    const vars = emailVars(payload);
+    const subject = fillTemplate(tmpl.subject, vars);
+    const html = emailBodyToHtml(fillTemplate(tmpl.body, vars));
+    const { data: res } = await supabase.functions.invoke("send-email", { body: { to: payload.to, subject, html } });
+    await supabase.from("email_log").insert({
+      kind, to_email: payload.to, subject,
+      status: res?.skipped ? "skipped" : "sent", detail: res?.reason || null,
+    });
+  } catch (e) {
+    try { await supabase.from("email_log").insert({ kind, to_email: payload?.to, status: "error", detail: String(e).slice(0, 200) }); } catch { /* noop */ }
+  }
+}
 
 // Ask the Calendar Worker to (re)sync a claim into the person's Google Calendar.
 // No-op (silent) if the Worker isn't configured or the user hasn't connected.
@@ -351,7 +492,7 @@ function ShiftBoard({ profile }) {
   const [offers, setOffers] = useState([]);     // incoming trade offers
   const [casts, setCasts] = useState([]);
   const [crew, setCrew] = useState([]);         // for trade target picker
-  const [tab, setTab] = useState("mine");       // mine | open
+  const [tab, setTab] = useState("open");       // open | mine (Open first — intuition)
   const [mode, setMode] = useState("list");     // list | calendar
   const [selDay, setSelDay] = useState(null);
   const [busyId, setBusyId] = useState(null);
@@ -385,7 +526,16 @@ function ShiftBoard({ profile }) {
     setBusyId(shiftId);
     const { data, error } = await supabase.rpc("claim_shift", { p_shift_id: shiftId });
     if (error) alert(error.message);
-    else if (data?.id) syncClaimToCalendar(data.id);
+    else {
+      if (data?.id) syncClaimToCalendar(data.id);
+      const ev = (events || []).find((e) => (e.shifts || []).some((s) => s.id === shiftId));
+      const sh = ev && (ev.shifts || []).find((s) => s.id === shiftId);
+      if (sh && profile.email) sendPortalEmail("claimed", {
+        to: profile.email, name: nameOf(profile), eventName: ev.name,
+        roleTitle: sh.role_title, date: fmtDate(sh.starts_at), time: fmtRange(sh.starts_at, sh.ends_at),
+        location: sh.location || ev.venue || "",
+      });
+    }
     await load(); setBusyId(null);
   }
   async function clockIn(shiftId, subshiftId) {
@@ -404,7 +554,14 @@ function ShiftBoard({ profile }) {
     setBusyId(t.trade_id);
     const { data, error } = await supabase.rpc("accept_shift_trade", { p_trade_id: t.trade_id });
     if (error) alert(error.message);
-    else if (data?.id) syncClaimToCalendar(data.id);
+    else {
+      if (data?.id) syncClaimToCalendar(data.id);
+      if (profile.email) sendPortalEmail("transferred", {
+        to: profile.email, name: nameOf(profile), eventName: t.event_name,
+        roleTitle: t.role_title, date: fmtDate(t.starts_at), time: fmtRange(t.starts_at, t.ends_at),
+        location: t.location || "", from: t.from_name,
+      });
+    }
     await load(); setBusyId(null);
   }
   async function declineOffer(t) {
@@ -458,8 +615,8 @@ function ShiftBoard({ profile }) {
       {/* view toggles */}
       <div className="flex items-center justify-between gap-2">
         <div className="inline-flex rounded-xl bg-ink/5 p-1">
-          <TabBtn active={tab === "mine"} onClick={() => setTab("mine")} icon={Check} label={`My shifts${claims.length ? ` (${claims.length})` : ""}`} />
           <TabBtn active={tab === "open"} onClick={() => setTab("open")} icon={Plus} label="Open shifts" />
+          <TabBtn active={tab === "mine"} onClick={() => setTab("mine")} icon={Check} label={`My shifts${claims.length ? ` (${claims.length})` : ""}`} />
         </div>
         <div className="inline-flex rounded-xl bg-ink/5 p-1">
           <TabBtn active={mode === "list"} onClick={() => { setMode("list"); setSelDay(null); }} icon={List} label="" title="List" />
@@ -502,10 +659,17 @@ function ShiftBoard({ profile }) {
                   <div className="bg-ink text-white px-4 py-3 flex items-center justify-between gap-2">
                     <div className="min-w-0">
                       <div className="font-display font-extrabold text-lg truncate">{ev.name}</div>
-                      <div className="text-white/70 text-sm flex items-center gap-1.5"><MapPin className="w-3.5 h-3.5 shrink-0" /> {ev.venue || "TBD"} · {fmtDate(ev.starts_at)}</div>
+                      <div className="text-white/70 text-sm flex items-center gap-1.5"><MapPin className="w-3.5 h-3.5 shrink-0" /> {ev.venue || "TBD"}{ev.starts_at ? ` · ${fmtDate(ev.starts_at)}` : ""}</div>
                     </div>
                     <button onClick={() => setAsking(ev)} className="text-white/80 hover:text-white text-xs font-semibold flex items-center gap-1 shrink-0"><HelpCircle className="w-4 h-4" /> Ask</button>
                   </div>
+                  {(ev.starts_at || ev.address || ev.notes) && (
+                    <div className="px-4 py-2.5 bg-ink/[0.03] text-sm text-ink/70 space-y-1 border-b border-ink/8">
+                      {ev.starts_at && <div className="flex items-center gap-1.5"><Calendar className="w-4 h-4 text-ink/40 shrink-0" /> {fmtDate(ev.starts_at)} · {fmtRange(ev.starts_at, ev.ends_at)}</div>}
+                      {ev.address && <div className="flex items-center gap-1.5"><MapPin className="w-4 h-4 text-ink/40 shrink-0" /> {ev.address}</div>}
+                      {ev.notes && <div className="flex items-start gap-1.5"><Info className="w-4 h-4 text-ink/40 mt-0.5 shrink-0" /> {ev.notes}</div>}
+                    </div>
+                  )}
                   <div className="divide-y divide-ink/8">
                     {shifts.map((s) => (
                       <OpenShiftRow key={s.id} shift={s} mySsIds={mySsIds} busy={busyId === s.id} onClaim={() => claim(s.id)} />
@@ -572,6 +736,8 @@ function MyShiftCard({ claim, hours, mySsIds, now, busyId, onClockIn, onClockOut
         <div className="flex items-center gap-1.5"><Calendar className="w-4 h-4 text-ink/40" /> {fmtDate(s.starts_at)} · {fmtRange(s.starts_at, s.ends_at)}</div>
         <div className="flex items-center gap-1.5"><MapPin className="w-4 h-4 text-ink/40" /> {s.location || ev.venue || "TBD"}</div>
         {rate != null && <div className="flex items-center gap-1.5"><DollarSign className="w-4 h-4 text-ink/40" /> {money(rate)}/hr</div>}
+        {s.attire && <div className="flex items-center gap-1.5"><Shirt className="w-4 h-4 text-ink/40" /> {s.attire}</div>}
+        {s.shift_type && <div className="flex items-center gap-1.5"><Tag className="w-4 h-4 text-ink/40" /> {s.shift_type}</div>}
       </div>
 
       <SubshiftChips subshifts={s.subshifts} mySsIds={mySsIds} />
@@ -608,10 +774,12 @@ function OpenShiftRow({ shift: s, mySsIds, busy, onClaim }) {
         <div className="font-bold">{s.role_title}</div>
         <div className="text-sm text-ink/60 flex flex-wrap gap-x-2">
           <span>{fmtRange(s.starts_at, s.ends_at)}</span>
+          {s.shift_type && <span>· {s.shift_type}</span>}
           {s.location && <span>· {s.location}</span>}
           {rate != null && <span>· {money(rate)}/hr</span>}
           <span>· {s.slots} {s.slots === 1 ? "spot" : "spots"}</span>
         </div>
+        {s.attire && <div className="text-xs text-ink/50 flex items-center gap-1 mt-0.5"><Shirt className="w-3.5 h-3.5" /> {s.attire}</div>}
         <SubshiftChips subshifts={s.subshifts} mySsIds={mySsIds} />
       </div>
       <Btn variant="canary" disabled={busy} onClick={onClaim} className="shrink-0">
@@ -875,21 +1043,101 @@ function MyDocuments({ profile }) {
 /* ------------------------------------------------------------------ */
 /*  ADMIN: Dashboard home                                              */
 /* ------------------------------------------------------------------ */
+// Staffing "traffic-light" bar: green = fully staffed, yellow = getting there,
+// red = needs crew.
+const staffTone = (r) => (r == null ? "neutral" : r >= 1 ? "green" : r >= 0.5 ? "yellow" : "red");
+const staffBarClass = {
+  green: "bg-green-500", yellow: "bg-amber-400", red: "bg-red-500", neutral: "bg-ink/20",
+};
+const staffDotClass = {
+  green: "bg-green-500", yellow: "bg-amber-400", red: "bg-red-500", neutral: "bg-ink/15",
+};
+
+function StaffBar({ filled, needed }) {
+  const ratio = needed ? filled / needed : null;
+  const pct = needed ? Math.min(100, Math.round((filled / needed) * 100)) : 0;
+  return (
+    <div className="flex items-center gap-2">
+      <div className="flex-1 h-2 rounded-full bg-ink/10 overflow-hidden">
+        <div className={`h-full ${staffBarClass[staffTone(ratio)]}`} style={{ width: `${pct}%` }} />
+      </div>
+      <span className="text-xs font-bold text-ink/60 tabular-nums shrink-0">{filled}/{needed}</span>
+    </div>
+  );
+}
+
+// Month calendar of shifts (not subtasks), each day colored by how staffed it is.
+function StaffingCalendar({ shifts }) {
+  const [cursor, setCursor] = useState(() => { const d = new Date(); d.setDate(1); d.setHours(0, 0, 0, 0); return d; });
+  const byDay = {};
+  shifts.forEach((s) => {
+    if (!s.starts_at) return;
+    const k = dayKey(s.starts_at);
+    (byDay[k] ||= { needed: 0, filled: 0, count: 0 });
+    byDay[k].needed += s._need; byDay[k].filled += s._fill; byDay[k].count += 1;
+  });
+  const year = cursor.getFullYear(), month = cursor.getMonth();
+  const startPad = new Date(year, month, 1).getDay();
+  const days = new Date(year, month + 1, 0).getDate();
+  const cells = [];
+  for (let i = 0; i < startPad; i++) cells.push(null);
+  for (let d = 1; d <= days; d++) cells.push(new Date(year, month, d));
+  const todayK = dayKey(new Date());
+  return (
+    <Card className="p-3">
+      <div className="flex items-center justify-between px-1 pb-2">
+        <button onClick={() => setCursor(new Date(year, month - 1, 1))} className="p-1.5 rounded-lg hover:bg-ink/5"><ChevronLeft className="w-5 h-5" /></button>
+        <div className="font-display font-extrabold">{cursor.toLocaleDateString(undefined, { month: "long", year: "numeric" })}</div>
+        <button onClick={() => setCursor(new Date(year, month + 1, 1))} className="p-1.5 rounded-lg hover:bg-ink/5"><ChevronRight className="w-5 h-5" /></button>
+      </div>
+      <div className="grid grid-cols-7 text-center text-[11px] font-bold text-ink/40 uppercase">
+        {["S", "M", "T", "W", "T", "F", "S"].map((d, i) => <div key={i} className="py-1">{d}</div>)}
+      </div>
+      <div className="grid grid-cols-7 gap-1">
+        {cells.map((d, i) => {
+          if (!d) return <div key={i} />;
+          const k = dayKey(d);
+          const info = byDay[k];
+          const ratio = info && info.needed ? info.filled / info.needed : null;
+          const tone = info ? staffTone(ratio) : null;
+          const bg = info ? { green: "bg-green-100", yellow: "bg-amber-100", red: "bg-red-100", neutral: "bg-ink/5" }[tone] : "";
+          return (
+            <div key={i} title={info ? `${info.filled}/${info.needed} spots filled · ${info.count} shift${info.count === 1 ? "" : "s"}` : ""}
+              className={`aspect-square rounded-lg flex flex-col items-center justify-center text-sm relative ${bg} ${k === todayK ? "ring-1 ring-ink/30" : ""}`}>
+              <span className={info ? "font-bold" : "text-ink/40"}>{d.getDate()}</span>
+              {info && <span className={`w-1.5 h-1.5 rounded-full mt-0.5 ${staffDotClass[tone]}`} />}
+            </div>
+          );
+        })}
+      </div>
+      <div className="flex items-center justify-center gap-3 pt-2 text-[11px] font-semibold text-ink/50">
+        <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-green-500" /> Fully staffed</span>
+        <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-amber-400" /> Getting there</span>
+        <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-red-500" /> Needs crew</span>
+      </div>
+    </Card>
+  );
+}
+
+const ACTIVE_CLAIM = new Set(["claimed", "confirmed", "completed"]);
+
 function AdminHome({ profile, onNav }) {
   const [stats, setStats] = useState(null);
+  const [events, setEvents] = useState([]);
   const [questions, setQuestions] = useState([]);
   const [answers, setAnswers] = useState({});
   const load = useCallback(async () => {
-    const [pend, reimb, onboard, events, disp, quest] = await Promise.all([
+    const [pend, reimb, onboard, disp, quest, ev] = await Promise.all([
       supabase.from("profiles").select("id", { count: "exact", head: true }).eq("status", "pending"),
       supabase.from("reimbursements").select("id", { count: "exact", head: true }).eq("status", "submitted"),
       supabase.from("onboarding_requests").select("id", { count: "exact", head: true }).eq("status", "new"),
-      supabase.from("events").select("id", { count: "exact", head: true }).eq("status", "published"),
       supabase.from("hours_entries").select("id", { count: "exact", head: true }).eq("status", "disputed"),
       supabase.from("shift_questions").select("*, profiles!shift_questions_crew_id_fkey(full_name,email), events(name)").eq("answered", false).order("created_at", { ascending: false }),
+      supabase.from("events").select("*, shifts(id,slots,status,starts_at,ends_at,role_title, claims(status))").order("starts_at", { ascending: true }),
     ]);
-    setStats({ pend: pend.count || 0, reimb: reimb.count || 0, onboard: onboard.count || 0, events: events.count || 0, disp: disp.count || 0, quest: (quest.data || []).length });
+    setStats({ pend: pend.count || 0, reimb: reimb.count || 0, onboard: onboard.count || 0, disp: disp.count || 0 });
     setQuestions(quest.data || []);
+    setEvents(ev.data || []);
   }, []);
   useEffect(() => { load(); }, [load]);
   async function answer(q) {
@@ -899,26 +1147,104 @@ function AdminHome({ profile, onNav }) {
     await load();
   }
 
-  const tiles = [
-    { key: "roster", label: "Access requests", value: stats?.pend, icon: UserPlus, tone: "canary" },
-    { key: "reimb", label: "Reimbursements", value: stats?.reimb, icon: DollarSign, tone: "forest" },
-    { key: "hours", label: "Hours disputes", value: stats?.disp, icon: AlertTriangle, tone: "canary" },
-    { key: "events", label: "Live events", value: stats?.events, icon: Calendar, tone: "forest" },
+  // staffing math
+  const fillOf = (s) => (s.claims || []).filter((c) => ACTIVE_CLAIM.has(c.status)).length;
+  const activeShifts = events.flatMap((e) =>
+    (e.shifts || []).filter((s) => s.status !== "cancelled")
+      .map((s) => ({ ...s, _need: s.slots || 0, _fill: Math.min(fillOf(s), s.slots || 0), _eventName: e.name })));
+  const eventStaff = (e) => {
+    const sh = (e.shifts || []).filter((s) => s.status !== "cancelled");
+    const needed = sh.reduce((a, s) => a + (s.slots || 0), 0);
+    const filled = sh.reduce((a, s) => a + Math.min(fillOf(s), s.slots || 0), 0);
+    return { needed, filled, ratio: needed ? filled / needed : null, count: sh.length };
+  };
+  const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+  const published = events.filter((e) => e.status === "published");
+  const upcoming = events.filter((e) => !e.starts_at || new Date(e.starts_at) >= todayStart);
+  const openShifts = activeShifts.filter((s) => s._fill < s._need).length;
+  const spotsToFill = activeShifts.reduce((a, s) => a + Math.max(0, s._need - s._fill), 0);
+  const fullyStaffed = published.filter((e) => { const st = eventStaff(e); return st.needed > 0 && st.ratio >= 1; }).length;
+
+  const snapshot = [
+    { label: "Live events", value: published.length },
+    { label: "Open shifts", value: openShifts, tone: openShifts ? "text-amber-600" : "" },
+    { label: "Spots to fill", value: spotsToFill, tone: spotsToFill ? "text-red-600" : "" },
+    { label: "Fully staffed", value: fullyStaffed },
+  ];
+  const alerts = [
+    { key: "roster", label: "Access requests", value: stats?.pend, icon: UserPlus },
+    { key: "roster", label: "New signups", value: stats?.onboard, icon: UserPlus },
+    { key: "reimb", label: "Reimbursements", value: stats?.reimb, icon: DollarSign },
+    { key: "hours", label: "Hours disputes", value: stats?.disp, icon: AlertTriangle },
   ];
 
   return (
     <div className="space-y-5">
-      <h1 className="font-display font-black text-3xl">Dashboard</h1>
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        {tiles.map((t, i) => (
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <h1 className="font-display font-black text-3xl">Dashboard</h1>
+        <Btn variant="canary" onClick={() => onNav("events")}><Plus className="w-4 h-4" /> New event</Btn>
+      </div>
+
+      {/* staffing snapshot */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        {snapshot.map((t, i) => (
+          <Card key={i} className="p-4">
+            <div className="text-ink/50 text-xs font-bold uppercase tracking-wide">{t.label}</div>
+            <div className={`font-display font-black text-3xl mt-1 ${t.tone || ""}`}>{stats ? t.value : "—"}</div>
+          </Card>
+        ))}
+      </div>
+
+      {/* alerts */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        {alerts.map((t, i) => (
           <button key={i} onClick={() => onNav(t.key)} className="text-left">
-            <Card className="p-4 hover:shadow-md transition">
-              <t.icon className={`w-7 h-7 ${t.tone === "canary" ? "text-canary" : "text-forest"}`} />
-              <div className="font-display font-black text-3xl mt-2">{stats ? t.value : "—"}</div>
-              <div className="text-ink/60 text-sm font-semibold">{t.label}</div>
+            <Card className="p-4 hover:shadow-md transition flex items-center gap-3">
+              <t.icon className="w-6 h-6 text-forest shrink-0" />
+              <div>
+                <div className="font-display font-black text-2xl leading-none">{stats ? (t.value || 0) : "—"}</div>
+                <div className="text-ink/60 text-xs font-semibold">{t.label}</div>
+              </div>
             </Card>
           </button>
         ))}
+      </div>
+
+      <div className="space-y-5">
+        {/* shifts calendar (big, full width) */}
+        <div>
+          <div className="font-bold text-lg mb-2 flex items-center gap-2"><CalendarDays className="w-5 h-5 text-forest" /> Shifts calendar
+            <span className="text-ink/40 font-normal text-sm">— every shift, colored by how staffed it is</span></div>
+          <StaffingCalendar shifts={activeShifts} />
+        </div>
+
+        {/* all events with staffing */}
+        <div>
+          <div className="font-bold text-lg mb-2 flex items-center gap-2"><Calendar className="w-5 h-5 text-forest" /> Events &amp; staffing</div>
+          <Card className="p-4">
+            {events.length === 0 ? <div className="text-ink/50 text-sm">No events yet.</div> :
+              <div className="space-y-3">
+                {(upcoming.length ? upcoming : events).map((e) => {
+                  const st = eventStaff(e);
+                  return (
+                    <button key={e.id} onClick={() => onNav("events")} className="w-full text-left border-t border-ink/8 pt-3 first:border-0 first:pt-0">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="font-bold truncate flex items-center gap-2">
+                            <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${staffDotClass[staffTone(st.ratio)]}`} />
+                            {e.name}
+                          </div>
+                          <div className="text-xs text-ink/50">{e.starts_at ? fmtDate(e.starts_at) : "No date"} · {st.count} shift{st.count === 1 ? "" : "s"}{e.status !== "published" ? ` · ${e.status}` : ""}</div>
+                        </div>
+                        <ChevronRight className="w-4 h-4 text-ink/30 shrink-0" />
+                      </div>
+                      <div className="mt-2"><StaffBar filled={st.filled} needed={st.needed} /></div>
+                    </button>
+                  );
+                })}
+              </div>}
+          </Card>
+        </div>
       </div>
 
       {questions.length > 0 && (
@@ -927,7 +1253,7 @@ function AdminHome({ profile, onNav }) {
           <div className="space-y-3">
             {questions.map((q) => (
               <div key={q.id} className="border-t border-ink/8 pt-3">
-                <div className="text-sm"><b>{q.profiles?.full_name || q.profiles?.email}</b>{q.events?.name ? ` · ${q.events.name}` : ""} · {fmtDate(q.created_at)}</div>
+                <div className="text-sm"><b>{nameOf(q.profiles)}</b>{q.events?.name ? ` · ${q.events.name}` : ""} · {fmtDate(q.created_at)}</div>
                 <div className="text-ink/80 mt-1">{q.body}</div>
                 <div className="flex gap-2 mt-2">
                   <input className={inp} placeholder="Type a reply…" value={answers[q.id] || ""} onChange={(e) => setAnswers((p) => ({ ...p, [q.id]: e.target.value }))} />
@@ -944,7 +1270,7 @@ function AdminHome({ profile, onNav }) {
         <div className="flex flex-wrap gap-2 mt-2">
           <Btn variant="canary" onClick={() => onNav("events")}><Plus className="w-4 h-4" /> New event</Btn>
           <Btn variant="ghost" onClick={() => onNav("hours")}><Clock className="w-4 h-4" /> Collect hours</Btn>
-          <Btn variant="ghost" onClick={() => onNav("broadcast")}><Megaphone className="w-4 h-4" /> Broadcast</Btn>
+          <Btn variant="ghost" onClick={() => onNav("roster")}><Users className="w-4 h-4" /> Roster</Btn>
           <Btn variant="ghost" onClick={() => onNav("qr")}><QrCode className="w-4 h-4" /> Roster QR</Btn>
         </div>
       </Card>
@@ -974,6 +1300,10 @@ function Roster() {
 
   async function decide(id, status) {
     await supabase.from("profiles").update({ status, approved_at: new Date().toISOString() }).eq("id", id);
+    if (status === "approved") {
+      const p = (pending || []).find((x) => x.id === id);
+      if (p?.email) sendPortalEmail("welcome", { to: p.email, name: nameOf(p) });
+    }
     await load();
   }
   async function invite(e) {
@@ -984,6 +1314,12 @@ function Roster() {
     setEmail(""); setBusy(false); await load();
   }
   async function removeInvite(em) { await supabase.from("invited_emails").delete().eq("email", em); await load(); }
+  async function deletePerson(p) {
+    if (!confirm(`Permanently delete ${nameOf(p)} and everything of theirs (claims, hours, documents)? This can't be undone.`)) return;
+    const { error } = await supabase.rpc("admin_delete_crew", { p_id: p.id });
+    if (error) { alert(error.message); return; }
+    await load();
+  }
 
   if (!pending) return <Spinner />;
   return (
@@ -1015,10 +1351,11 @@ function Roster() {
           <div className="space-y-2">
             {pending.map((p) => (
               <div key={p.id} className="flex items-center justify-between gap-3 border-t border-ink/8 pt-3">
-                <div><div className="font-bold">{p.full_name || p.email}</div><div className="text-sm text-ink/60">{p.email}</div></div>
-                <div className="flex gap-2">
+                <div className="min-w-0"><div className="font-bold truncate">{nameOf(p)}</div><div className="text-sm text-ink/60 truncate">{p.email}</div></div>
+                <div className="flex gap-1.5 shrink-0">
                   <Btn variant="forest" onClick={() => decide(p.id, "approved")}><Check className="w-4 h-4" /> Approve</Btn>
-                  <Btn variant="ghost" onClick={() => decide(p.id, "rejected")}><X className="w-4 h-4" /></Btn>
+                  <Btn variant="ghost" onClick={() => decide(p.id, "rejected")} title="Reject (keep record)"><X className="w-4 h-4" /></Btn>
+                  <button onClick={() => deletePerson(p)} className="text-ink/40 hover:text-red-600 px-1" title="Delete permanently"><Trash2 className="w-4 h-4" /></button>
                 </div>
               </div>
             ))}
@@ -1030,9 +1367,12 @@ function Roster() {
         {crew.length === 0 ? <p className="text-ink/50 text-sm">No approved crew yet.</p> :
           <div className="space-y-1">
             {crew.map((c) => (
-              <div key={c.id} className="flex items-center justify-between text-sm border-t border-ink/8 pt-2">
-                <span>{c.full_name || c.email}</span>
-                {c.role === "admin" ? <Pill tone="forest">Admin</Pill> : <span className="text-ink/50">{c.email}</span>}
+              <div key={c.id} className="flex items-center justify-between gap-2 text-sm border-t border-ink/8 pt-2">
+                <div className="min-w-0"><div className="font-semibold truncate">{nameOf(c)}</div><div className="text-ink/50 text-xs truncate">{c.email}</div></div>
+                <div className="flex items-center gap-2 shrink-0">
+                  {c.role === "admin" && <Pill tone="forest">Admin</Pill>}
+                  <button onClick={() => deletePerson(c)} className="text-ink/40 hover:text-red-600" title={`Delete ${nameOf(c)}`}><Trash2 className="w-4 h-4" /></button>
+                </div>
               </div>
             ))}
           </div>}
@@ -1054,8 +1394,9 @@ function ManageEvents() {
   useEffect(() => { load(); }, [load]);
 
   async function saveEvent(ev) {
-    if (ev.id) await supabase.from("events").update(ev).eq("id", ev.id);
-    else await supabase.from("events").insert(ev);
+    const clean = { ...ev, starts_at: ev.starts_at || null, ends_at: ev.ends_at || null };
+    if (clean.id) await supabase.from("events").update(clean).eq("id", clean.id);
+    else await supabase.from("events").insert(clean);
     setEditing(null); await load();
   }
   async function togglePublish(ev) {
@@ -1095,9 +1436,9 @@ function ManageEvents() {
 function EventEditor({ event, onCancel, onSave, onReload }) {
   const [f, setF] = useState({
     name: event.name || "", venue: event.venue || "", address: event.address || "",
-    starts_at: event.starts_at ? event.starts_at.slice(0, 16) : "",
-    ends_at: event.ends_at ? event.ends_at.slice(0, 16) : "",
-    attire: event.attire || "", notes: event.notes || "", is_public: !!event.is_public,
+    starts_at: event.starts_at || "",
+    ends_at: event.ends_at || "",
+    notes: event.notes || "", is_public: !!event.is_public,
     visibility: event.visibility || "all_crew",
     status: event.status || "draft", id: event.id,
   });
@@ -1133,14 +1474,12 @@ function EventEditor({ event, onCancel, onSave, onReload }) {
           <Field label="Venue"><input className={inp} value={f.venue} onChange={(e) => set("venue", e.target.value)} /></Field>
           <Field label="Address"><input className={inp} value={f.address} onChange={(e) => set("address", e.target.value)} /></Field>
         </div>
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="Starts"><input type="datetime-local" className={inp} value={f.starts_at} onChange={(e) => set("starts_at", e.target.value)} /></Field>
-          <Field label="Ends"><input type="datetime-local" className={inp} value={f.ends_at} onChange={(e) => set("ends_at", e.target.value)} /></Field>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <Field label="Starts"><DateTimeField value={f.starts_at} onChange={(v) => set("starts_at", v)} /></Field>
+          <Field label="Ends"><DateTimeField value={f.ends_at} onChange={(v) => set("ends_at", v)} /></Field>
         </div>
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="Attire"><input className={inp} value={f.attire} onChange={(e) => set("attire", e.target.value)} /></Field>
-          <Field label="Notes"><input className={inp} value={f.notes} onChange={(e) => set("notes", e.target.value)} /></Field>
-        </div>
+        <div className="flex justify-end -mt-1"><DurationHint start={f.starts_at} end={f.ends_at} /></div>
+        <Field label="Notes (crew can see)"><textarea className={inp} rows={2} value={f.notes} onChange={(e) => set("notes", e.target.value)} placeholder="Anything the whole crew should know about this event…" /></Field>
         <Field label="Who can see this event">
           <select className={inp} value={f.visibility} onChange={(e) => set("visibility", e.target.value)}>
             <option value="all_crew">All approved crew</option>
@@ -1161,7 +1500,7 @@ function EventEditor({ event, onCancel, onSave, onReload }) {
             {crew.map((c) => (
               <label key={c.id} className="flex items-center gap-2 text-sm border border-ink/10 rounded-lg px-3 py-2 cursor-pointer">
                 <input type="checkbox" checked={!!assigned[c.id]} onChange={() => toggleAssign(c.id)} />
-                {c.full_name || c.email}
+                {nameOf(c)}
               </label>
             ))}
             {crew.length === 0 && <div className="text-ink/50 text-sm">No approved crew yet.</div>}
@@ -1172,7 +1511,7 @@ function EventEditor({ event, onCancel, onSave, onReload }) {
         <Card className="p-4 text-sm text-ink/60">Save the event first, then a list of crew to assign will appear here.</Card>
       )}
 
-      {event.id && <ShiftManager eventId={event.id} eventVenue={f.venue} crew={crew} />}
+      {event.id && <ShiftManager eventId={event.id} eventVenue={f.venue} eventName={f.name} crew={crew} />}
       {!event.id && <Card className="p-4 text-sm text-ink/60">Save the event first, then you can add shifts, subshifts, rates, and assignments.</Card>}
 
       <div className="flex gap-2">
@@ -1188,34 +1527,32 @@ function EventEditor({ event, onCancel, onSave, onReload }) {
 /* ------------------------------------------------------------------ */
 const dtInput = (iso) => (iso ? String(iso).slice(0, 16) : "");
 
-function ShiftManager({ eventId, eventVenue, crew }) {
+function ShiftManager({ eventId, eventVenue, eventName, crew }) {
   const [shifts, setShifts] = useState(null);
   const [claimsBy, setClaimsBy] = useState({});   // shift_id -> [claim w/ profile]
-  const [ssaBy, setSsaBy] = useState({});         // subshift_id -> [crew_id]
   const [open, setOpen] = useState({});           // shift_id -> bool
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
-    const { data: sh } = await supabase.from("shifts").select("*, subshifts(*)").eq("event_id", eventId).order("starts_at");
+    const { data: sh } = await supabase.from("shifts").select("*, subshifts(*)")
+      .eq("event_id", eventId)
+      .order("sort_order", { ascending: true })
+      .order("starts_at", { ascending: true, nullsFirst: false });
     setShifts(sh || []);
     const ids = (sh || []).map((s) => s.id);
-    const subIds = (sh || []).flatMap((s) => (s.subshifts || []).map((x) => x.id));
     if (ids.length) {
       const { data: cl } = await supabase.from("claims")
         .select("*, profiles!claims_crew_id_fkey(id,full_name,email)").in("shift_id", ids)
         .in("status", ["claimed", "confirmed", "waitlisted", "completed"]);
       const cm = {}; (cl || []).forEach((c) => { (cm[c.shift_id] ||= []).push(c); }); setClaimsBy(cm);
     } else setClaimsBy({});
-    if (subIds.length) {
-      const { data: sa } = await supabase.from("subshift_assignments").select("*").in("subshift_id", subIds);
-      const sm = {}; (sa || []).forEach((a) => { (sm[a.subshift_id] ||= []).push(a.crew_id); }); setSsaBy(sm);
-    } else setSsaBy({});
   }, [eventId]);
   useEffect(() => { load(); }, [load]);
 
   async function addShift() {
     setBusy(true);
-    const { data } = await supabase.from("shifts").insert({ event_id: eventId, role_title: "New role", slots: 1, rate_visible: true, status: "active" }).select("*, subshifts(*)").single();
+    const nextOrder = (shifts || []).reduce((m, s) => Math.max(m, s.sort_order || 0), 0) + 10;
+    const { data } = await supabase.from("shifts").insert({ event_id: eventId, role_title: "New role", slots: 1, rate_visible: true, status: "active", sort_order: nextOrder }).select("*, subshifts(*)").single();
     setBusy(false);
     if (data) { setOpen((p) => ({ ...p, [data.id]: true })); await load(); }
   }
@@ -1227,12 +1564,32 @@ function ShiftManager({ eventId, eventVenue, crew }) {
     if (!confirm("Delete this shift? (Use Cancel instead if crew already claimed it.)")) return;
     await supabase.from("shifts").delete().eq("id", id); await load();
   }
+  async function duplicate(id) {
+    setBusy(true);
+    const { data, error } = await supabase.rpc("duplicate_shift", { p_shift_id: id });
+    setBusy(false);
+    if (error) { alert(error.message); return; }
+    if (data?.id) setOpen((p) => ({ ...p, [data.id]: true }));
+    await load();
+  }
+  async function move(id, dir) {
+    await supabase.rpc("reorder_shift", { p_shift_id: id, p_direction: dir });
+    await load();
+  }
+  async function autoSort() {
+    await supabase.rpc("resort_event_shifts", { p_event_id: eventId });
+    await load();
+  }
   async function cancelShift(s) {
     const claimants = (claimsBy[s.id] || []);
     await supabase.from("shifts").update({ status: "cancelled", cancelled_at: new Date().toISOString() }).eq("id", s.id);
-    // let anyone who claimed it know
     for (const c of claimants) {
       await supabase.from("notifications").insert({ user_id: c.crew_id, type: "shift_cancelled", title: "Shift cancelled", body: `${s.role_title} was cancelled by a manager.` });
+      if (c.profiles?.email) sendPortalEmail("cancelled", {
+        to: c.profiles.email, name: nameOf(c.profiles), eventName,
+        roleTitle: s.role_title, date: fmtDate(s.starts_at), time: fmtRange(s.starts_at, s.ends_at),
+        location: s.location || eventVenue || "",
+      });
     }
     await load();
   }
@@ -1256,100 +1613,101 @@ function ShiftManager({ eventId, eventVenue, crew }) {
     }
     await load();
   }
-  async function toggleSubAssign(subId, crewId, on) {
-    if (on) await supabase.from("subshift_assignments").insert({ subshift_id: subId, crew_id: crewId });
-    else await supabase.from("subshift_assignments").delete().eq("subshift_id", subId).eq("crew_id", crewId);
-    await load();
-  }
 
   if (!shifts) return <Card className="p-4"><Spinner label="Loading shifts…" /></Card>;
 
   return (
     <Card className="p-4">
-      <div className="flex items-center justify-between mb-3">
+      <div className="flex items-center justify-between gap-2 mb-3 flex-wrap">
         <div className="font-bold text-lg">Shifts</div>
-        <Btn variant="canary" onClick={addShift} disabled={busy}><Plus className="w-4 h-4" /> Add shift</Btn>
+        <div className="flex gap-2">
+          {shifts.length > 1 && <Btn variant="ghost" onClick={autoSort} className="!px-3"><ArrowDownUp className="w-4 h-4" /> Sort by time</Btn>}
+          <Btn variant="canary" onClick={addShift} disabled={busy}><Plus className="w-4 h-4" /> Add shift</Btn>
+        </div>
       </div>
       {shifts.length === 0 && <div className="text-ink/50 text-sm">No shifts yet — add one above.</div>}
       <div className="space-y-2">
-        {shifts.map((s) => {
+        {shifts.map((s, idx) => {
           const claimants = claimsBy[s.id] || [];
-          const nameFor = (id) => { const c = claimants.find((x) => x.crew_id === id); return c?.profiles?.full_name || c?.profiles?.email; };
+          const filled = claimants.filter((c) => c.status !== "waitlisted").length;
           return (
             <div key={s.id} className={`border rounded-xl ${s.status === "cancelled" ? "border-red-200 bg-red-50/40" : "border-ink/10"}`}>
-              <button onClick={() => setOpen((p) => ({ ...p, [s.id]: !p[s.id] }))} className="w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left">
-                <div className="min-w-0">
-                  <div className="font-bold flex items-center gap-2">{s.role_title || "Untitled"} {s.status === "cancelled" && <Pill tone="red">cancelled</Pill>}</div>
-                  <div className="text-xs text-ink/50">{s.starts_at ? `${fmtDate(s.starts_at)} · ${fmtRange(s.starts_at, s.ends_at)}` : "No time set"} · {claimants.length}/{s.slots} filled{(s.subshifts || []).length ? ` · ${s.subshifts.length} subshifts` : ""}</div>
+              <div className="flex items-center gap-1 pr-2">
+                {/* up / down reorder */}
+                <div className="flex flex-col pl-1.5 py-1">
+                  <button onClick={() => move(s.id, -1)} disabled={idx === 0} className="text-ink/30 hover:text-ink disabled:opacity-20 disabled:hover:text-ink/30" title="Move up"><ArrowUp className="w-4 h-4" /></button>
+                  <button onClick={() => move(s.id, 1)} disabled={idx === shifts.length - 1} className="text-ink/30 hover:text-ink disabled:opacity-20 disabled:hover:text-ink/30" title="Move down"><ArrowDown className="w-4 h-4" /></button>
                 </div>
-                <ChevronDown className={`w-5 h-5 shrink-0 text-ink/40 transition ${open[s.id] ? "rotate-180" : ""}`} />
-              </button>
+                <button onClick={() => setOpen((p) => ({ ...p, [s.id]: !p[s.id] }))} className="flex-1 min-w-0 flex items-center justify-between gap-2 px-2 py-2.5 text-left">
+                  <div className="min-w-0">
+                    <div className="font-bold flex items-center gap-2 truncate">{s.role_title || "Untitled"}{s.shift_type ? <span className="text-ink/40 font-medium text-sm">· {s.shift_type}</span> : null} {s.status === "cancelled" && <Pill tone="red">cancelled</Pill>}</div>
+                    <div className="text-xs text-ink/50">{s.starts_at ? `${fmtDate(s.starts_at)} · ${fmtRange(s.starts_at, s.ends_at)}` : "No time set"} · {filled}/{s.slots} filled{(s.subshifts || []).length ? ` · ${s.subshifts.length} subtasks` : ""}</div>
+                  </div>
+                  <ChevronDown className={`w-5 h-5 shrink-0 text-ink/40 transition ${open[s.id] ? "rotate-180" : ""}`} />
+                </button>
+              </div>
 
               {open[s.id] && (
                 <div className="px-3 pb-3 space-y-3 border-t border-ink/8 pt-3">
                   <div className="grid grid-cols-2 gap-2">
                     <Field label="Role / position"><input className={inp} value={s.role_title || ""} onChange={(e) => updShift(s.id, { role_title: e.target.value })} /></Field>
+                    <Field label="Type"><input className={inp} value={s.shift_type || ""} placeholder="e.g. Setup, Event, Teardown" onChange={(e) => updShift(s.id, { shift_type: e.target.value })} /></Field>
                     <Field label="Location"><input className={inp} value={s.location || ""} placeholder={eventVenue || "Where"} onChange={(e) => updShift(s.id, { location: e.target.value })} /></Field>
-                    <Field label="Starts"><input type="datetime-local" className={inp} value={dtInput(s.starts_at)} onChange={(e) => updShift(s.id, { starts_at: e.target.value })} /></Field>
-                    <Field label="Ends"><input type="datetime-local" className={inp} value={dtInput(s.ends_at)} onChange={(e) => updShift(s.id, { ends_at: e.target.value })} /></Field>
+                    <Field label="Attire"><input className={inp} value={s.attire || ""} placeholder="All black, closed-toe shoes…" onChange={(e) => updShift(s.id, { attire: e.target.value })} /></Field>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <Field label="Starts"><DateTimeField value={s.starts_at || ""} onChange={(v) => updShift(s.id, { starts_at: v || null })} /></Field>
+                    <Field label="Ends"><DateTimeField value={s.ends_at || ""} onChange={(v) => updShift(s.id, { ends_at: v || null })} /></Field>
+                  </div>
+                  <div className="flex justify-end -mt-1"><DurationHint start={s.starts_at} end={s.ends_at} /></div>
+                  <div className="grid grid-cols-2 gap-2">
                     <Field label="People needed"><input type="number" min="1" className={inp} value={s.slots || 1} onChange={(e) => updShift(s.id, { slots: Number(e.target.value) })} /></Field>
-                    <Field label="Rate $/hr"><input type="number" step="0.01" className={inp} value={s.public_rate ?? ""} onChange={(e) => updShift(s.id, { public_rate: e.target.value ? Number(e.target.value) : null })} /></Field>
+                    <Field label="Wage $/hr"><input type="number" step="0.01" className={inp} value={s.public_rate ?? ""} onChange={(e) => updShift(s.id, { public_rate: e.target.value ? Number(e.target.value) : null })} /></Field>
                   </div>
                   <label className="flex items-center gap-2 text-sm font-semibold">
                     <input type="checkbox" checked={s.rate_visible !== false} onChange={(e) => updShift(s.id, { rate_visible: e.target.checked })} />
-                    Show this rate to crew {s.rate_visible === false && <span className="text-ink/40 font-normal">(hidden)</span>}
+                    Show this wage to crew {s.rate_visible === false && <span className="text-ink/40 font-normal">(hidden)</span>}
                   </label>
                   <Field label="Notes (crew can see)"><input className={inp} value={s.notes || ""} onChange={(e) => updShift(s.id, { notes: e.target.value })} placeholder="Arrive 15 min early, park in Lot C…" /></Field>
                   <Field label="Internal notes (admins only)"><input className={inp} value={s.admin_notes || ""} onChange={(e) => updShift(s.id, { admin_notes: e.target.value })} /></Field>
 
-                  {/* Subshifts / rotation */}
+                  {/* Subtasks / rotation (times with hourly calculator; not separately assignable) */}
                   <div className="rounded-lg bg-ink/[0.03] p-3">
                     <div className="flex items-center justify-between mb-2">
-                      <div className="font-bold text-sm flex items-center gap-1.5"><Repeat className="w-4 h-4 text-forest" /> Subshifts (rotation)</div>
-                      <Btn variant="ghost" onClick={() => addSubshift(s.id, (s.subshifts || []).length)} className="!px-2 !py-1 text-xs"><Plus className="w-3.5 h-3.5" /> Add</Btn>
+                      <div className="font-bold text-sm flex items-center gap-1.5"><Repeat className="w-4 h-4 text-forest" /> Subtasks</div>
+                      <Btn variant="ghost" onClick={() => addSubshift(s.id, (s.subshifts || []).length)} className="!px-2 !py-1 text-xs"><Plus className="w-3.5 h-3.5" /> Add subtask</Btn>
                     </div>
-                    {(s.subshifts || []).length === 0 && <div className="text-ink/40 text-xs">Optional — e.g. Front Gate 4–6p, then Merch 6–10p.</div>}
+                    {(s.subshifts || []).length === 0 && <div className="text-ink/40 text-xs">Optional — e.g. Front Gate 4–6p, then Merch 6–10p. These belong to this shift and move with whoever is assigned to it.</div>}
                     <div className="space-y-2">
                       {[...(s.subshifts || [])].sort((a, b) => a.sort_order - b.sort_order).map((ss) => (
                         <div key={ss.id} className="bg-white border border-ink/10 rounded-lg p-2 space-y-2">
                           <div className="grid grid-cols-2 gap-2">
-                            <input className={inp} value={ss.title || ""} placeholder="Segment name" onChange={(e) => updSubshift(ss.id, { title: e.target.value }, s.id)} />
+                            <input className={inp} value={ss.title || ""} placeholder="Subtask name" onChange={(e) => updSubshift(ss.id, { title: e.target.value }, s.id)} />
                             <input className={inp} value={ss.location || ""} placeholder="Location" onChange={(e) => updSubshift(ss.id, { location: e.target.value }, s.id)} />
-                            <input type="datetime-local" className={inp} value={dtInput(ss.starts_at)} onChange={(e) => updSubshift(ss.id, { starts_at: e.target.value }, s.id)} />
-                            <input type="datetime-local" className={inp} value={dtInput(ss.ends_at)} onChange={(e) => updSubshift(ss.id, { ends_at: e.target.value }, s.id)} />
                           </div>
-                          {claimants.length > 0 && (
-                            <div>
-                              <div className="text-[11px] font-bold uppercase tracking-wide text-ink/40 mb-1">Who's on this segment</div>
-                              <div className="flex flex-wrap gap-1.5">
-                                {claimants.map((c) => {
-                                  const on = (ssaBy[ss.id] || []).includes(c.crew_id);
-                                  return (
-                                    <button key={c.crew_id} onClick={() => toggleSubAssign(ss.id, c.crew_id, !on)}
-                                      className={`text-xs font-semibold px-2 py-1 rounded-lg border ${on ? "bg-canary/40 border-canary" : "bg-white border-ink/15 text-ink/60"}`}>
-                                      {c.profiles?.full_name || c.profiles?.email}
-                                    </button>
-                                  );
-                                })}
-                              </div>
-                            </div>
-                          )}
-                          <div className="flex justify-end"><button className="text-red-600 text-xs flex items-center gap-1" onClick={() => delSubshift(ss.id)}><Trash2 className="w-3.5 h-3.5" /> Remove segment</button></div>
+                          <div className="grid sm:grid-cols-2 gap-2">
+                            <label className="block"><span className="text-[11px] font-bold uppercase tracking-wide text-ink/40">Starts</span><div className="mt-1"><DateTimeField value={ss.starts_at || ""} onChange={(v) => updSubshift(ss.id, { starts_at: v || null }, s.id)} /></div></label>
+                            <label className="block"><span className="text-[11px] font-bold uppercase tracking-wide text-ink/40">Ends</span><div className="mt-1"><DateTimeField value={ss.ends_at || ""} onChange={(v) => updSubshift(ss.id, { ends_at: v || null }, s.id)} /></div></label>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <DurationHint start={ss.starts_at} end={ss.ends_at} />
+                            <button className="text-red-600 text-xs flex items-center gap-1" onClick={() => delSubshift(ss.id)}><Trash2 className="w-3.5 h-3.5" /> Remove subtask</button>
+                          </div>
                         </div>
                       ))}
                     </div>
                   </div>
 
-                  {/* Assignment */}
+                  {/* Assignment (shift-level only) */}
                   <div>
-                    <div className="text-[11px] font-bold uppercase tracking-wide text-ink/40 mb-1">Assign crew ({claimants.length}/{s.slots})</div>
+                    <div className="text-[11px] font-bold uppercase tracking-wide text-ink/40 mb-1">Assign crew ({filled}/{s.slots})</div>
                     <div className="grid sm:grid-cols-2 gap-1.5 max-h-56 overflow-auto">
                       {crew.map((c) => {
                         const on = claimants.some((x) => x.crew_id === c.id);
                         return (
                           <label key={c.id} className="flex items-center gap-2 text-sm border border-ink/10 rounded-lg px-2.5 py-1.5 cursor-pointer">
                             <input type="checkbox" checked={on} onChange={(e) => toggleAssign(s.id, c.id, e.target.checked)} />
-                            {c.full_name || c.email}
+                            {nameOf(c)}
                           </label>
                         );
                       })}
@@ -1357,7 +1715,8 @@ function ShiftManager({ eventId, eventVenue, crew }) {
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-2 pt-1">
+                  <div className="flex items-center gap-2 pt-1 flex-wrap">
+                    <Btn variant="ghost" onClick={() => duplicate(s.id)} disabled={busy}><Copy className="w-4 h-4" /> Duplicate</Btn>
                     {s.status === "cancelled"
                       ? <Btn variant="ghost" onClick={() => reactivateShift(s)}><Check className="w-4 h-4" /> Reactivate</Btn>
                       : <Btn variant="ghost" onClick={() => cancelShift(s)}><Ban className="w-4 h-4" /> Cancel shift</Btn>}
@@ -1601,53 +1960,116 @@ function AdminHours() {
   const [crew, setCrew] = useState([]);
   const [events, setEvents] = useState([]);
   const [form, setForm] = useState({ crew_id: "", event_id: "", hours: "", rate: "" });
-  const [editHours, setEditHours] = useState({});
+  const [edit, setEdit] = useState({});          // id -> { hours, rate }
+  const [fCrew, setFCrew] = useState("");
+  const [fEvent, setFEvent] = useState("");
+  const [fStatus, setFStatus] = useState("");
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => { const t = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(t); }, []);
+
   const load = useCallback(async () => {
     const [{ data: h }, { data: c }, { data: e }] = await Promise.all([
-      supabase.from("hours_entries").select("*, profiles!hours_entries_crew_id_fkey(full_name,email), events(name)").order("created_at", { ascending: false }),
+      supabase.from("hours_entries")
+        .select("*, profiles!hours_entries_crew_id_fkey(full_name,email), events(name), shifts(role_title)")
+        .order("check_in_at", { ascending: false, nullsFirst: false })
+        .order("created_at", { ascending: false }),
       supabase.from("profiles").select("id,full_name,email").eq("status", "approved").order("full_name"),
       supabase.from("events").select("id,name").order("starts_at", { ascending: false }),
     ]);
     setRows(h || []); setCrew(c || []); setEvents(e || []);
   }, []);
   useEffect(() => { load(); }, [load]);
-  async function verify(r) {
-    const hrs = editHours[r.id] != null ? Number(editHours[r.id]) : Number(r.hours || 0);
-    const amount = r.rate_applied ? hrs * Number(r.rate_applied) : r.amount;
-    await supabase.from("hours_entries").update({ hours: hrs, amount, status: "verified", verified_at: new Date().toISOString() }).eq("id", r.id);
+
+  const eHrs = (r) => String(edit[r.id]?.hours ?? (r.hours ?? ""));
+  const eRate = (r) => String(edit[r.id]?.rate ?? (r.rate_applied ?? ""));
+  const setF = (id, k, v) => setEdit((p) => ({ ...p, [id]: { ...p[id], [k]: v } }));
+
+  async function save(r) {
+    const hrs = Number(eHrs(r) || 0);
+    const rate = eRate(r) !== "" ? Number(eRate(r)) : null;
+    await supabase.from("hours_entries").update({
+      hours: hrs, rate_applied: rate, amount: rate != null ? +(hrs * rate).toFixed(2) : null,
+      status: "verified", verified_at: new Date().toISOString(),
+    }).eq("id", r.id);
+    setEdit((p) => { const n = { ...p }; delete n[r.id]; return n; });
+    await load();
+  }
+  async function adminClockOut(r) {
+    const hrs = +(((Date.now() - new Date(r.check_in_at)) / 3600000)).toFixed(2);
+    await supabase.from("hours_entries").update({ check_out_at: new Date().toISOString(), hours: hrs }).eq("id", r.id);
     await load();
   }
   async function addHours(e) {
     e.preventDefault();
     const hrs = Number(form.hours), rate = form.rate ? Number(form.rate) : null;
-    await supabase.from("hours_entries").insert({ crew_id: form.crew_id, event_id: form.event_id || null, hours: hrs, rate_applied: rate, amount: rate ? hrs * rate : null, status: "verified", source: "admin", verified_at: new Date().toISOString() });
+    await supabase.from("hours_entries").insert({ crew_id: form.crew_id, event_id: form.event_id || null, hours: hrs, rate_applied: rate, amount: rate ? +(hrs * rate).toFixed(2) : null, status: "verified", source: "admin", verified_at: new Date().toISOString() });
     setForm({ crew_id: "", event_id: "", hours: "", rate: "" }); await load();
   }
-  function exportCsv() {
-    const header = ["Crew", "Event", "Hours", "Rate", "Amount", "Status", "Date"];
-    const lines = rows.map((r) => [
-      (r.profiles?.full_name || r.profiles?.email || "").replace(/,/g, " "),
-      (r.events?.name || "").replace(/,/g, " "),
+  function exportCsv(list) {
+    const header = ["Crew", "Event", "Role", "Clock in", "Clock out", "Hours", "Rate", "Amount", "Status", "Date"];
+    const cell = (x) => `"${String(x ?? "").replace(/"/g, '""')}"`;
+    const lines = list.map((r) => [
+      nameOf(r.profiles), r.events?.name || "", r.shifts?.role_title || "",
+      r.check_in_at ? new Date(r.check_in_at).toLocaleString() : "",
+      r.check_out_at ? new Date(r.check_out_at).toLocaleString() : "",
       r.hours || 0, r.rate_applied || "", r.amount || "", r.status, new Date(r.created_at).toLocaleDateString(),
-    ].join(","));
+    ].map(cell).join(","));
     const csv = [header.join(","), ...lines].join("\n");
     const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
     const a = document.createElement("a"); a.href = url; a.download = "eventshop-timesheet.csv"; a.click(); URL.revokeObjectURL(url);
   }
+
   if (!rows) return <Spinner />;
+
+  const onClock = rows.filter((r) => r.check_in_at && !r.check_out_at);
+  const filtered = rows.filter((r) =>
+    (!fCrew || r.crew_id === fCrew) && (!fEvent || r.event_id === fEvent) && (!fStatus || r.status === fStatus));
+  const pending = rows.filter((r) => r.status === "submitted").length;
+  const disputed = rows.filter((r) => r.status === "disputed").length;
+  const verifiedHrs = rows.filter((r) => r.status === "verified").reduce((a, r) => a + Number(r.hours || 0), 0);
+  const tone = (s) => (s === "verified" ? "green" : s === "disputed" ? "red" : "amber");
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between flex-wrap gap-2">
-        <h1 className="font-display font-black text-3xl">Hours</h1>
-        <Btn variant="ghost" onClick={exportCsv}><Download className="w-4 h-4" /> Export timesheet (CSV)</Btn>
+        <h1 className="font-display font-black text-3xl">Collect &amp; verify hours</h1>
+        <Btn variant="ghost" onClick={() => exportCsv(filtered)}><Download className="w-4 h-4" /> Export CSV</Btn>
       </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <Card className="p-4"><div className="text-ink/50 text-xs font-bold uppercase tracking-wide">On the clock</div><div className="font-display font-black text-3xl">{onClock.length}</div></Card>
+        <Card className="p-4"><div className="text-ink/50 text-xs font-bold uppercase tracking-wide">To verify</div><div className={`font-display font-black text-3xl ${pending ? "text-amber-600" : ""}`}>{pending}</div></Card>
+        <Card className="p-4"><div className="text-ink/50 text-xs font-bold uppercase tracking-wide">Disputed</div><div className={`font-display font-black text-3xl ${disputed ? "text-red-600" : ""}`}>{disputed}</div></Card>
+        <Card className="p-4"><div className="text-ink/50 text-xs font-bold uppercase tracking-wide">Verified hrs</div><div className="font-display font-black text-3xl">{verifiedHrs.toFixed(1)}</div></Card>
+      </div>
+
+      {onClock.length > 0 && (
+        <Card className="p-4 border-forest/30 bg-forest/5">
+          <div className="font-bold flex items-center gap-2 mb-2"><Timer className="w-4 h-4 text-forest" /> On the clock right now</div>
+          <div className="space-y-2">
+            {onClock.map((r) => (
+              <div key={r.id} className="flex items-center justify-between gap-2 border-t border-ink/8 pt-2 flex-wrap">
+                <div className="min-w-0">
+                  <div className="font-semibold truncate">{nameOf(r.profiles)}</div>
+                  <div className="text-xs text-ink/60 truncate">{r.events?.name || "—"}{r.shifts?.role_title ? ` · ${r.shifts.role_title}` : ""} · in at {fmtTime(r.check_in_at)}</div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <span className="font-mono font-bold text-forest">{liveDur(r.check_in_at, null)}</span>
+                  <Btn variant="danger" onClick={() => adminClockOut(r)}><Square className="w-4 h-4" /> Clock out</Btn>
+                </div>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+
       <Card className="p-5">
         <div className="font-bold text-lg mb-2">Log hours for a crew member</div>
         <form onSubmit={addHours} className="grid sm:grid-cols-5 gap-2 items-end">
           <div className="sm:col-span-2"><Field label="Crew">
             <select className={inp} value={form.crew_id} onChange={(e) => setForm((p) => ({ ...p, crew_id: e.target.value }))} required>
               <option value="">Select…</option>
-              {crew.map((c) => <option key={c.id} value={c.id}>{c.full_name || c.email}</option>)}
+              {crew.map((c) => <option key={c.id} value={c.id}>{nameOf(c)}</option>)}
             </select></Field></div>
           <div className="sm:col-span-2"><Field label="Event">
             <select className={inp} value={form.event_id} onChange={(e) => setForm((p) => ({ ...p, event_id: e.target.value }))}>
@@ -1659,24 +2081,51 @@ function AdminHours() {
           <Btn type="submit" variant="canary" disabled={!form.crew_id || !form.hours}><Plus className="w-4 h-4" /> Add</Btn>
         </form>
       </Card>
-      {rows.map((r) => (
-        <Card key={r.id} className="p-4 flex items-center justify-between gap-3 flex-wrap">
-          <div>
-            <div className="font-bold">{r.profiles?.full_name || r.profiles?.email} · {r.events?.name || "—"}</div>
-            <div className="text-sm text-ink/60">{Number(r.hours || 0).toFixed(2)} hrs{r.amount ? ` · ${money(r.amount)}` : ""} · {fmtDate(r.created_at)}{r.note ? ` · “${r.note}”` : ""}</div>
-          </div>
-          <div className="flex items-center gap-2">
-            <Pill tone={r.status === "verified" ? "green" : r.status === "disputed" ? "red" : "amber"}>{r.status}</Pill>
-            {r.status !== "verified" && (
-              <>
-                <input type="number" step="0.25" defaultValue={r.hours || ""} onChange={(e) => setEditHours((p) => ({ ...p, [r.id]: e.target.value }))}
-                  className="w-20 border border-ink/20 rounded-lg px-2 py-1.5" placeholder="hrs" />
-                <Btn variant="forest" onClick={() => verify(r)}><Check className="w-4 h-4" /> Verify</Btn>
-              </>
-            )}
-          </div>
-        </Card>
-      ))}
+
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-ink/50 text-sm flex items-center gap-1"><Filter className="w-4 h-4" /> Filter</span>
+        <select className="border border-ink/20 rounded-lg px-2 py-1.5 text-sm" value={fCrew} onChange={(e) => setFCrew(e.target.value)}>
+          <option value="">All crew</option>{crew.map((c) => <option key={c.id} value={c.id}>{nameOf(c)}</option>)}
+        </select>
+        <select className="border border-ink/20 rounded-lg px-2 py-1.5 text-sm" value={fEvent} onChange={(e) => setFEvent(e.target.value)}>
+          <option value="">All events</option>{events.map((ev) => <option key={ev.id} value={ev.id}>{ev.name}</option>)}
+        </select>
+        <select className="border border-ink/20 rounded-lg px-2 py-1.5 text-sm" value={fStatus} onChange={(e) => setFStatus(e.target.value)}>
+          <option value="">Any status</option><option value="submitted">To verify</option><option value="verified">Verified</option><option value="disputed">Disputed</option>
+        </select>
+        {(fCrew || fEvent || fStatus) && <button className="text-sm underline text-ink/50" onClick={() => { setFCrew(""); setFEvent(""); setFStatus(""); }}>clear</button>}
+      </div>
+
+      {filtered.length === 0 ? <Empty icon={Clock} title="No hours here" body="Clock-ins, self-logged hours, and manual entries show up here for you to verify." /> :
+        filtered.map((r) => (
+          <Card key={r.id} className="p-4">
+            <div className="flex items-start justify-between gap-3 flex-wrap">
+              <div className="min-w-0">
+                <div className="font-bold truncate">{nameOf(r.profiles)} <span className="text-ink/40 font-normal">· {r.events?.name || "—"}{r.shifts?.role_title ? ` · ${r.shifts.role_title}` : ""}</span></div>
+                <div className="text-sm text-ink/60">
+                  {r.check_in_at
+                    ? <>{fmtDate(r.check_in_at)} · {fmtTime(r.check_in_at)}{r.check_out_at ? `–${fmtTime(r.check_out_at)}` : " (still open)"}</>
+                    : <>{fmtDate(r.created_at)} · self-logged</>}
+                  {r.source === "admin" ? " · added by manager" : ""}
+                  {r.note ? ` · “${r.note}”` : ""}
+                </div>
+              </div>
+              <Pill tone={tone(r.status)}>{r.status === "submitted" ? "to verify" : r.status}</Pill>
+            </div>
+            <div className="mt-3 flex items-end gap-2 flex-wrap">
+              <label className="text-xs font-bold uppercase tracking-wide text-ink/50">Hours
+                <input type="number" step="0.25" value={eHrs(r)} onChange={(e) => setF(r.id, "hours", e.target.value)} className="mt-1 w-24 border border-ink/20 rounded-lg px-2 py-1.5 block" /></label>
+              <label className="text-xs font-bold uppercase tracking-wide text-ink/50">Rate $/hr
+                <input type="number" step="0.01" value={eRate(r)} onChange={(e) => setF(r.id, "rate", e.target.value)} className="mt-1 w-24 border border-ink/20 rounded-lg px-2 py-1.5 block" /></label>
+              <div className="text-sm text-ink/60 pb-2">= <b>{money(Number(eHrs(r) || 0) * Number(eRate(r) || 0))}</b></div>
+              <div className="ml-auto flex gap-2">
+                {r.status === "verified"
+                  ? <Btn variant="ghost" onClick={() => save(r)}><Check className="w-4 h-4" /> Update</Btn>
+                  : <Btn variant="forest" onClick={() => save(r)}><Check className="w-4 h-4" /> Verify</Btn>}
+              </div>
+            </div>
+          </Card>
+        ))}
     </div>
   );
 }
@@ -1804,6 +2253,116 @@ function PublicJoin() {
 }
 
 /* ------------------------------------------------------------------ */
+/*  ADMIN: Emails — view / edit templates + monitor what's been sent    */
+/* ------------------------------------------------------------------ */
+const EMAIL_SAMPLE = { name: "Sam", roleTitle: "Bartender", eventName: "Summer Gala", date: "Sat, Aug 2", time: "5:00–11:00 PM", location: "The Standard", from: "Alex" };
+
+function EmailManager({ profile }) {
+  const [rows, setRows] = useState(null);
+  const [log, setLog] = useState([]);
+  const [draft, setDraft] = useState({});
+  const [savedKind, setSavedKind] = useState("");
+  const [busyKind, setBusyKind] = useState("");
+  const [openKind, setOpenKind] = useState("");
+
+  const load = useCallback(async () => {
+    const [{ data: t }, { data: l }] = await Promise.all([
+      supabase.from("email_templates").select("*").order("kind"),
+      supabase.from("email_log").select("*").order("created_at", { ascending: false }).limit(30),
+    ]);
+    setRows(t || []); setLog(l || []);
+    const d = {}; (t || []).forEach((x) => { d[x.kind] = { subject: x.subject, body: x.body, enabled: x.enabled }; });
+    setDraft(d);
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const setD = (kind, k, v) => setDraft((p) => ({ ...p, [kind]: { ...p[kind], [k]: v } }));
+  async function save(kind) {
+    setBusyKind(kind);
+    const d = draft[kind];
+    await supabase.from("email_templates").update({ subject: d.subject, body: d.body, enabled: d.enabled, updated_at: new Date().toISOString() }).eq("kind", kind);
+    setBusyKind(""); setSavedKind(kind); setTimeout(() => setSavedKind(""), 2500); await load();
+  }
+  async function sendTest(kind) {
+    setBusyKind(kind + "-test");
+    const d = draft[kind];
+    const subject = fillTemplate(d.subject, emailVars(EMAIL_SAMPLE));
+    const html = emailBodyToHtml(fillTemplate(d.body, emailVars(EMAIL_SAMPLE)));
+    const { data: res } = await supabase.functions.invoke("send-email", { body: { to: profile.email, subject, html } });
+    await supabase.from("email_log").insert({ kind, to_email: profile.email, subject, status: res?.skipped ? "skipped" : "sent", detail: res?.reason || "test" });
+    setBusyKind(""); await load();
+    alert(res?.skipped
+      ? "Emails aren't switched on yet — add your Resend key in Supabase and test emails will land in your inbox."
+      : `Test sent to ${profile.email} — check your inbox!`);
+  }
+
+  if (!rows) return <Spinner />;
+
+  const statusTone = (s) => (s === "sent" ? "green" : s === "error" ? "red" : "amber");
+
+  return (
+    <div className="space-y-4">
+      <h1 className="font-display font-black text-3xl">Emails</h1>
+      <Card className="p-4 bg-forest/5 border-forest/20 text-sm text-ink/70 flex items-start gap-2">
+        <Info className="w-5 h-5 text-forest shrink-0" />
+        <div>These go out automatically. Edit the wording anytime — the words in curly braces fill in on their own:
+          <b> {"{name}"}</b>, <b>{"{role}"}</b>, <b>{"{event}"}</b>, <b>{"{when}"}</b>, <b>{"{where}"}</b>, <b>{"{from}"}</b>. Use “Send test to me” to see one in your own inbox.</div>
+      </Card>
+
+      {rows.map((t) => {
+        const d = draft[t.kind] || { subject: "", body: "", enabled: true };
+        const previewHtml = emailBodyToHtml(fillTemplate(d.body, emailVars(EMAIL_SAMPLE)));
+        const previewSubject = fillTemplate(d.subject, emailVars(EMAIL_SAMPLE));
+        const isOpen = openKind === t.kind;
+        return (
+          <Card key={t.kind} className="p-4">
+            <div className="flex items-center justify-between gap-2">
+              <div className="font-bold text-lg flex items-center gap-2"><Mail className="w-5 h-5 text-forest" /> {t.label}</div>
+              <label className="flex items-center gap-2 text-sm font-semibold">
+                <input type="checkbox" checked={d.enabled} onChange={(e) => setD(t.kind, "enabled", e.target.checked)} />
+                {d.enabled ? "On" : "Off"}
+              </label>
+            </div>
+            <div className="mt-3 space-y-2">
+              <Field label="Subject"><input className={inp} value={d.subject} onChange={(e) => setD(t.kind, "subject", e.target.value)} /></Field>
+              <Field label="Message"><textarea className={inp} rows={8} value={d.body} onChange={(e) => setD(t.kind, "body", e.target.value)} /></Field>
+            </div>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <Btn variant="primary" onClick={() => save(t.kind)} disabled={busyKind === t.kind}>{busyKind === t.kind ? <Loader2 className="w-4 h-4 animate-spin" /> : "Save"}</Btn>
+              <Btn variant="ghost" onClick={() => sendTest(t.kind)} disabled={busyKind === t.kind + "-test"}>{busyKind === t.kind + "-test" ? <Loader2 className="w-4 h-4 animate-spin" /> : <><Send className="w-4 h-4" /> Send test to me</>}</Btn>
+              <Btn variant="ghost" onClick={() => setOpenKind(isOpen ? "" : t.kind)}>{isOpen ? "Hide preview" : "Preview"}</Btn>
+              {savedKind === t.kind && <span className="text-forest font-semibold flex items-center gap-1"><Check className="w-4 h-4" /> Saved</span>}
+            </div>
+            {isOpen && (
+              <div className="mt-3">
+                <div className="text-xs text-ink/50 mb-1"><b>Subject:</b> {previewSubject}</div>
+                <iframe title={`preview-${t.kind}`} srcDoc={previewHtml} className="w-full h-80 border border-ink/10 rounded-xl bg-white" />
+              </div>
+            )}
+          </Card>
+        );
+      })}
+
+      <Card className="p-5">
+        <div className="font-bold text-lg mb-2 flex items-center gap-2"><List className="w-5 h-5 text-forest" /> Recent emails</div>
+        {log.length === 0 ? <p className="text-ink/50 text-sm">Nothing sent yet. Emails show up here as they go out.</p> :
+          <div className="space-y-1">
+            {log.map((r) => (
+              <div key={r.id} className="flex items-center justify-between gap-2 text-sm border-t border-ink/8 pt-2">
+                <div className="min-w-0">
+                  <div className="truncate"><b>{r.to_email || "—"}</b> <span className="text-ink/50">· {r.subject}</span></div>
+                  <div className="text-xs text-ink/40">{fmtDate(r.created_at)} {fmtTime(r.created_at)}{r.detail ? ` · ${r.detail}` : ""}</div>
+                </div>
+                <Pill tone={statusTone(r.status)}>{r.status}</Pill>
+              </div>
+            ))}
+          </div>}
+      </Card>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /*  Navigation shell                                                   */
 /* ------------------------------------------------------------------ */
 const CREW_NAV = [
@@ -1819,6 +2378,7 @@ const ADMIN_NAV = [
   { key: "roster", label: "Roster", icon: Users },
   { key: "reimb", label: "Reimburse", icon: DollarSign },
   { key: "broadcast", label: "Broadcast", icon: Radio },
+  { key: "emails", label: "Emails", icon: Mail },
   { key: "settings", label: "Settings", icon: Settings },
 ];
 
@@ -1871,6 +2431,7 @@ function App() {
       case "events": return <ManageEvents />;
       case "roster": return <Roster />;
       case "broadcast": return <AdminBroadcast />;
+      case "emails": return <EmailManager profile={profile} />;
       case "settings": return <AdminSettings />;
       case "qr": return <RosterQR />;
       default: return <ShiftBoard profile={profile} />;
