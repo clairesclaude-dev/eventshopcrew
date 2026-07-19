@@ -1,0 +1,19 @@
+name = "es-crew-calendar"
+main = "src/index.js"
+compatibility_date = "2024-11-01"
+
+# --- Public config (safe to commit) -----------------------------------------
+[vars]
+SUPABASE_URL = "https://ctqsfozjvmvmnnuzucmt.supabase.co"
+APP_ORIGIN   = "https://eventshopcrew.com"
+# After you deploy the Worker, its URL is https://es-crew-calendar.<you>.workers.dev
+# REDIRECT_URI must be exactly that URL + /oauth/callback and must ALSO be added
+# to your Google Cloud OAuth client's "Authorized redirect URIs".
+REDIRECT_URI = "https://es-crew-calendar.<you>.workers.dev/oauth/callback"
+TIMEZONE     = "America/New_York"
+
+# --- Secrets (DO NOT put these here — set them with `wrangler secret put`) ----
+#   wrangler secret put GOOGLE_CLIENT_ID
+#   wrangler secret put GOOGLE_CLIENT_SECRET
+#   wrangler secret put SUPABASE_SERVICE_ROLE_KEY
+#   wrangler secret put STATE_SECRET        # any long random string

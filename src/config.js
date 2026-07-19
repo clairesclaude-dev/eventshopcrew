@@ -23,3 +23,9 @@ export const BRAND = {
 
 // Where portal notifications / approvals are directed
 export const ADMIN_EMAIL = "eventshopknox@gmail.com";
+
+// Google Calendar sync backend (Cloudflare Worker). Leave blank until the
+// Worker is deployed; the "Add to Google Calendar" features stay hidden until
+// this is set, so the app never errors in the meantime.
+export const CALENDAR_WORKER_URL = ""; // e.g. "https://es-crew-calendar.<you>.workers.dev"
+export const CALENDAR_ENABLED = !!CALENDAR_WORKER_URL;
