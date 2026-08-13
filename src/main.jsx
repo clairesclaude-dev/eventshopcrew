@@ -714,6 +714,44 @@ function SubshiftChips({ subshifts, mySsIds }) {
   );
 }
 
+// Escape a value for an .ics field (RFC 5545).
+function icsEsc(s) {
+  return String(s == null ? "" : s).replace(/\\/g, "\\\\").replace(/;/g, "\\;").replace(/,/g, "\\,").replace(/\r?\n/g, "\\n");
+}
+
+// Build + download a universal .ics calendar file for a claimed shift. Works
+// with Apple Calendar, Google Calendar (import), and Outlook — no server needed,
+// so crew can add a shift to their own calendar the moment they claim it.
+function addShiftToCalendar(shift, ev) {
+  const start = shift.starts_at;
+  const end = shift.ends_at || shift.starts_at;
+  if (!start) { alert("This shift doesn't have a start time yet, so it can't be added to a calendar."); return; }
+  const stamp = (iso) => new Date(iso).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
+  const title = `${shift.role_title || "Shift"}${ev && ev.name ? " · " + ev.name : ""}`;
+  const loc = shift.location || (ev && (ev.venue || ev.address)) || "";
+  const desc = [shift.notes, shift.attire ? `Attire: ${shift.attire}` : "", shift.shift_type ? `Type: ${shift.shift_type}` : ""].filter(Boolean).join("\n");
+  const uid = `${shift.id || "shift"}-${stamp(start)}@eventshopcrew`;
+  const lines = [
+    "BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//EventShop//Crew Portal//EN", "CALSCALE:GREGORIAN", "METHOD:PUBLISH",
+    "BEGIN:VEVENT",
+    `UID:${uid}`,
+    `DTSTAMP:${stamp(new Date().toISOString())}`,
+    `DTSTART:${stamp(start)}`,
+    `DTEND:${stamp(end)}`,
+    `SUMMARY:${icsEsc(title)}`,
+    loc ? `LOCATION:${icsEsc(loc)}` : "",
+    desc ? `DESCRIPTION:${icsEsc(desc)}` : "",
+    "END:VEVENT", "END:VCALENDAR",
+  ].filter(Boolean);
+  const blob = new Blob([lines.join("\r\n")], { type: "text/calendar;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${(shift.role_title || "shift").replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.ics`;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+}
+
 function MyShiftCard({ claim, hours, mySsIds, now, busyId, onClockIn, onClockOut, onTrade, connected }) {
   const s = claim.shifts || {};
   const ev = s.events || {};
@@ -755,6 +793,7 @@ function MyShiftCard({ claim, hours, mySsIds, now, busyId, onClockIn, onClockOut
             <Btn variant="forest" disabled={busyId === s.id} onClick={() => onClockIn(s.id, null)}><Play className="w-4 h-4" /> Clock in</Btn>
           )}
           {total > 0 && <span className="text-sm text-ink/60">Total: <b>{fmtDur(total)}</b></span>}
+          <Btn variant="ghost" onClick={() => addShiftToCalendar(s, ev)} disabled={!s.starts_at}><CalendarPlus className="w-4 h-4" /> Add to calendar</Btn>
           <Btn variant="ghost" onClick={onTrade}><ArrowLeftRight className="w-4 h-4" /> Offer to…</Btn>
           {CALENDAR_ENABLED && connected && (
             <span className="inline-flex items-center gap-1 text-xs text-forest font-semibold"><CalendarPlus className="w-3.5 h-3.5" /> On Google Calendar</span>
@@ -845,10 +884,21 @@ function OfferTradeModal({ claim, crew, onClose, onDone }) {
 
 function MonthCalendar({ claims, openEvents, tab, selDay, onSelDay }) {
   const [cursor, setCursor] = useState(() => { const d = new Date(); d.setDate(1); d.setHours(0, 0, 0, 0); return d; });
+
+  // day key -> [{ key, title, sub, iso, cancelled }]
   const byDay = {};
-  const add = (iso) => { if (!iso) return; const k = dayKey(iso); byDay[k] = (byDay[k] || 0) + 1; };
-  if (tab === "mine") claims.forEach((c) => add(c.shifts?.starts_at));
-  else openEvents.forEach((e) => (e.shifts || []).forEach((s) => add(s.starts_at)));
+  const push = (iso, item) => { if (!iso) return; const k = dayKey(iso); (byDay[k] ||= []).push(item); };
+  if (tab === "mine") {
+    claims.forEach((c) => {
+      const s = c.shifts || {};
+      push(s.starts_at, { key: c.id, title: s.role_title || "Shift", sub: s.events?.name || "", iso: s.starts_at, cancelled: s.status === "cancelled" });
+    });
+  } else {
+    openEvents.forEach((e) => (e.shifts || []).forEach((s) => {
+      push(s.starts_at, { key: s.id, title: s.role_title || "Shift", sub: e.name || "", iso: s.starts_at });
+    }));
+  }
+  Object.values(byDay).forEach((arr) => arr.sort((a, b) => ((a.iso || "") < (b.iso || "") ? -1 : 1)));
 
   const year = cursor.getFullYear(), month = cursor.getMonth();
   const first = new Date(year, month, 1);
@@ -857,7 +907,9 @@ function MonthCalendar({ claims, openEvents, tab, selDay, onSelDay }) {
   const cells = [];
   for (let i = 0; i < startPad; i++) cells.push(null);
   for (let d = 1; d <= days; d++) cells.push(new Date(year, month, d));
+  while (cells.length % 7 !== 0) cells.push(null);
   const todayK = dayKey(new Date());
+  const MAX = 3;
 
   return (
     <Card className="p-3">
@@ -871,22 +923,35 @@ function MonthCalendar({ claims, openEvents, tab, selDay, onSelDay }) {
       </div>
       <div className="grid grid-cols-7 gap-1">
         {cells.map((d, i) => {
-          if (!d) return <div key={i} />;
+          if (!d) return <div key={i} className="min-h-[80px] rounded-lg" />;
           const k = dayKey(d);
-          const count = byDay[k] || 0;
+          const items = byDay[k] || [];
           const sel = selDay === k;
+          const isToday = k === todayK;
           return (
             <button key={i} onClick={() => onSelDay(sel ? null : k)}
-              className={`aspect-square rounded-lg flex flex-col items-center justify-center text-sm relative transition
-                ${sel ? "bg-ink text-white" : count ? "bg-canary/25 hover:bg-canary/40" : "hover:bg-ink/5"}
-                ${k === todayK && !sel ? "ring-1 ring-ink/30" : ""}`}>
-              <span className={count && !sel ? "font-bold" : ""}>{d.getDate()}</span>
-              {count > 0 && <span className={`w-1.5 h-1.5 rounded-full mt-0.5 ${sel ? "bg-canary" : "bg-forest"}`} />}
+              title={items.length ? `${items.length} shift${items.length === 1 ? "" : "s"} — tap to see them` : ""}
+              className={`min-h-[80px] rounded-lg p-1 text-left flex flex-col gap-0.5 border transition overflow-hidden
+                ${sel ? "border-ink bg-ink/5" : items.length ? "border-ink/15 hover:border-ink/40" : "border-transparent hover:bg-ink/5"}`}>
+              <div className="flex items-center justify-between">
+                <span className={`text-xs leading-none w-5 h-5 flex items-center justify-center rounded-full ${isToday ? "bg-ink text-white font-bold" : items.length ? "font-bold text-ink" : "text-ink/40"}`}>{d.getDate()}</span>
+              </div>
+              <div className="flex flex-col gap-0.5">
+                {items.slice(0, MAX).map((it) => (
+                  <span key={it.key} title={`${it.title}${it.sub ? " · " + it.sub : ""}`}
+                    className={`block truncate text-[10px] leading-tight px-1 py-0.5 rounded ${it.cancelled ? "line-through bg-red-100 text-red-700" : tab === "mine" ? "bg-forest/15 text-forest" : "bg-canary/40 text-ink"}`}>
+                    {fmtTime(it.iso) && <b className="font-bold">{fmtTime(it.iso)} </b>}{it.title}
+                  </span>
+                ))}
+                {items.length > MAX && <span className="text-[10px] font-semibold text-ink/50 px-1">+{items.length - MAX} more</span>}
+              </div>
             </button>
           );
         })}
       </div>
-      {selDay && <div className="text-center text-xs text-ink/50 pt-2">Showing {new Date(selDay).toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" })} · <button className="underline" onClick={() => onSelDay(null)}>clear</button></div>}
+      {selDay
+        ? <div className="text-center text-xs text-ink/50 pt-2">Showing {new Date(selDay).toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" })} · <button className="underline" onClick={() => onSelDay(null)}>clear</button></div>
+        : <div className="text-center text-xs text-ink/40 pt-2">Tap a day to see its shifts below.</div>}
     </Card>
   );
 }
@@ -1384,9 +1449,70 @@ function Roster() {
 /* ------------------------------------------------------------------ */
 /*  ADMIN: Events (create / edit / publish + shifts w/ rates)          */
 /* ------------------------------------------------------------------ */
+// Deep-duplicate an event: details + every shift/subtask + crew (live claims,
+// segment assignments, and the private-event crew list). The copy starts as an
+// unpublished draft so you can adjust dates and re-post. Crew rows are
+// best-effort — a row that can't be copied is skipped rather than aborting.
+// Direct claim inserts (admin assignment) bypass the RPC overlap guard, so
+// copying crew onto same-time shifts is safe.
+async function cloneEvent(srcId) {
+  const { data: src, error: e0 } = await supabase.from("events").select("*").eq("id", srcId).single();
+  if (e0 || !src) throw new Error(e0?.message || "Event not found");
+  const { id: _oldId, created_at: _c0, ...evCopy } = src;
+  evCopy.name = (src.name || "Event") + " (copy)";
+  evCopy.status = "draft";
+  const { data: newEv, error: e1 } = await supabase.from("events").insert(evCopy).select("id").single();
+  if (e1 || !newEv) throw new Error(e1?.message || "Couldn't create the copy");
+
+  const { data: shifts } = await supabase.from("shifts").select("*, subshifts(*)").eq("event_id", srcId).order("sort_order");
+  const shiftMap = {}, subMap = {};
+  for (const s of shifts || []) {
+    const { id: oldSid, created_at: _c1, event_id: _ev, subshifts, cancelled_at: _ca, cancelled_by: _cb, ...sCopy } = s;
+    sCopy.event_id = newEv.id;
+    sCopy.status = "active";
+    const { data: ns, error: se } = await supabase.from("shifts").insert(sCopy).select("id").single();
+    if (se || !ns) continue;
+    shiftMap[oldSid] = ns.id;
+    for (const ss of subshifts || []) {
+      const { id: oldSsid, created_at: _c2, shift_id: _sh, ...ssCopy } = ss;
+      ssCopy.shift_id = ns.id;
+      const { data: nss } = await supabase.from("subshifts").insert(ssCopy).select("id").single();
+      if (nss) subMap[oldSsid] = nss.id;
+    }
+  }
+
+  // keep crew — copy live claims onto the matching new shifts
+  const oldShiftIds = Object.keys(shiftMap);
+  if (oldShiftIds.length) {
+    const { data: claims } = await supabase.from("claims").select("shift_id, crew_id")
+      .in("shift_id", oldShiftIds).in("status", ["claimed", "confirmed", "completed"]);
+    for (const c of claims || []) {
+      await supabase.from("claims").insert({ shift_id: shiftMap[c.shift_id], crew_id: c.crew_id, status: "claimed" });
+    }
+  }
+  // keep any segment (rotation) assignments
+  const oldSubIds = Object.keys(subMap);
+  if (oldSubIds.length) {
+    const { data: ssa } = await supabase.from("subshift_assignments").select("subshift_id, crew_id").in("subshift_id", oldSubIds);
+    for (const a of ssa || []) {
+      await supabase.from("subshift_assignments").insert({ subshift_id: subMap[a.subshift_id], crew_id: a.crew_id });
+    }
+  }
+  // keep the private-event crew list (table may not exist on older DBs — ignore)
+  try {
+    const { data: ea } = await supabase.from("event_assignments").select("crew_id").eq("event_id", srcId);
+    for (const a of ea || []) {
+      await supabase.from("event_assignments").insert({ event_id: newEv.id, crew_id: a.crew_id });
+    }
+  } catch (_e) { /* no event_assignments table — skip */ }
+
+  return newEv.id;
+}
+
 function ManageEvents() {
   const [events, setEvents] = useState(null);
   const [editing, setEditing] = useState(null);
+  const [dupId, setDupId] = useState(null);
   const load = useCallback(async () => {
     const { data } = await supabase.from("events").select("*, shifts(*)").order("starts_at", { ascending: false });
     setEvents(data || []);
@@ -1395,13 +1521,33 @@ function ManageEvents() {
 
   async function saveEvent(ev) {
     const clean = { ...ev, starts_at: ev.starts_at || null, ends_at: ev.ends_at || null };
-    if (clean.id) await supabase.from("events").update(clean).eq("id", clean.id);
-    else await supabase.from("events").insert(clean);
-    setEditing(null); await load();
+    let saved = null;
+    if (clean.id) {
+      const { data } = await supabase.from("events").update(clean).eq("id", clean.id).select().single();
+      saved = data;
+    } else {
+      const { data } = await supabase.from("events").insert(clean).select().single();
+      saved = data;
+    }
+    await load();
+    return saved;
   }
   async function togglePublish(ev) {
     await supabase.from("events").update({ status: ev.status === "published" ? "draft" : "published" }).eq("id", ev.id);
     await load();
+  }
+  async function duplicate(ev) {
+    setDupId(ev.id);
+    try {
+      const newId = await cloneEvent(ev.id);
+      await load();
+      const { data } = await supabase.from("events").select("*").eq("id", newId).single();
+      setDupId(null);
+      if (data) setEditing(data);
+    } catch (err) {
+      setDupId(null);
+      alert("Couldn't duplicate this event: " + (err?.message || err));
+    }
   }
 
   if (!events) return <Spinner />;
@@ -1416,13 +1562,16 @@ function ManageEvents() {
       {events.length === 0 ? <Empty icon={Calendar} title="No events yet" body="Create your first event to start posting shifts." /> :
         events.map((ev) => (
           <Card key={ev.id} className="p-4">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
               <div>
                 <div className="font-display font-extrabold text-xl">{ev.name}</div>
                 <div className="text-sm text-ink/60">{ev.venue || "—"} · {fmtDate(ev.starts_at)} · {(ev.shifts || []).length} shifts</div>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <Pill tone={ev.status === "published" ? "green" : "default"}>{ev.status}</Pill>
+                <Btn variant="ghost" onClick={() => duplicate(ev)} disabled={dupId === ev.id}>
+                  {dupId === ev.id ? <><Loader2 className="w-4 h-4 animate-spin" /> Duplicating…</> : <><Copy className="w-4 h-4" /> Duplicate</>}
+                </Btn>
                 <Btn variant="ghost" onClick={() => togglePublish(ev)}>{ev.status === "published" ? "Unpublish" : "Publish"}</Btn>
                 <Btn variant="ghost" onClick={() => setEditing(ev)}>Edit</Btn>
               </div>
@@ -1434,6 +1583,7 @@ function ManageEvents() {
 }
 
 function EventEditor({ event, onCancel, onSave, onReload }) {
+  const [eventId, setEventId] = useState(event.id || null);
   const [f, setF] = useState({
     name: event.name || "", venue: event.venue || "", address: event.address || "",
     starts_at: event.starts_at || "",
@@ -1444,30 +1594,49 @@ function EventEditor({ event, onCancel, onSave, onReload }) {
   });
   const [crew, setCrew] = useState([]);
   const [assigned, setAssigned] = useState({});
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
   const set = (k, v) => setF((p) => ({ ...p, [k]: v }));
 
   useEffect(() => {
     (async () => {
       const { data: cr } = await supabase.from("profiles").select("id,full_name,email").eq("role", "crew").eq("status", "approved").order("full_name");
       setCrew(cr || []);
-      if (event.id) {
-        const { data: as } = await supabase.from("event_assignments").select("crew_id").eq("event_id", event.id);
+      if (eventId) {
+        const { data: as } = await supabase.from("event_assignments").select("crew_id").eq("event_id", eventId);
         const m = {}; (as || []).forEach((a) => { m[a.crew_id] = true; }); setAssigned(m);
       }
     })();
-  }, [event.id]);
+  }, [eventId]);
 
   async function toggleAssign(cid) {
-    if (!event.id) { alert("Save the event first, then assign people."); return; }
+    if (!eventId) { alert("Save the event first, then assign people."); return; }
     const now = !assigned[cid];
     setAssigned((p) => ({ ...p, [cid]: now }));
-    if (now) await supabase.from("event_assignments").insert({ event_id: event.id, crew_id: cid });
-    else await supabase.from("event_assignments").delete().eq("event_id", event.id).eq("crew_id", cid);
+    if (now) await supabase.from("event_assignments").insert({ event_id: eventId, crew_id: cid });
+    else await supabase.from("event_assignments").delete().eq("event_id", eventId).eq("crew_id", cid);
   }
+
+  async function handleSaveEvent() {
+    setSaving(true);
+    const savedRow = await onSave({ ...f, id: eventId || undefined });
+    setSaving(false);
+    if (savedRow) {
+      setEventId(savedRow.id);
+      setF((p) => ({ ...p, id: savedRow.id }));
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2500);
+    }
+  }
+
+  const eventDatesBad = f.starts_at && f.ends_at && new Date(f.ends_at) <= new Date(f.starts_at);
 
   return (
     <div className="space-y-4">
-      <h1 className="font-display font-black text-3xl">{event.id ? "Edit event" : "New event"}</h1>
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <h1 className="font-display font-black text-3xl">{eventId ? "Edit event" : "New event"}</h1>
+        <Btn variant="ghost" onClick={onCancel}><ChevronLeft className="w-4 h-4" /> All events</Btn>
+      </div>
       <Card className="p-5 space-y-3">
         <Field label="Event name"><input className={inp} value={f.name} onChange={(e) => set("name", e.target.value)} /></Field>
         <div className="grid grid-cols-2 gap-3">
@@ -1479,6 +1648,9 @@ function EventEditor({ event, onCancel, onSave, onReload }) {
           <Field label="Ends"><DateTimeField value={f.ends_at} onChange={(v) => set("ends_at", v)} /></Field>
         </div>
         <div className="flex justify-end -mt-1"><DurationHint start={f.starts_at} end={f.ends_at} /></div>
+        {eventDatesBad && (
+          <div className="text-red-600 text-sm flex items-center gap-1.5"><AlertTriangle className="w-4 h-4" /> The event ends before (or when) it starts — double-check the dates.</div>
+        )}
         <Field label="Notes (crew can see)"><textarea className={inp} rows={2} value={f.notes} onChange={(e) => set("notes", e.target.value)} placeholder="Anything the whole crew should know about this event…" /></Field>
         <Field label="Who can see this event">
           <select className={inp} value={f.visibility} onChange={(e) => set("visibility", e.target.value)}>
@@ -1490,9 +1662,16 @@ function EventEditor({ event, onCancel, onSave, onReload }) {
           <input type="checkbox" checked={f.is_public} onChange={(e) => set("is_public", e.target.checked)} />
           Also show shifts on the public (no-login) board
         </label>
+        <div className="flex items-center gap-3 pt-1 flex-wrap">
+          <Btn variant="primary" onClick={handleSaveEvent} disabled={saving}>
+            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <><Check className="w-4 h-4" /> Save event</>}
+          </Btn>
+          {saved && <span className="text-forest font-semibold flex items-center gap-1"><Check className="w-4 h-4" /> Saved</span>}
+          {!eventId && <span className="text-ink/50 text-sm">Save once to start adding shifts below.</span>}
+        </div>
       </Card>
 
-      {f.visibility === "private" && event.id && (
+      {f.visibility === "private" && eventId && (
         <Card className="p-5">
           <div className="font-bold text-lg mb-1">Assign crew</div>
           <p className="text-ink/60 text-sm mb-3">Only the people you check will see and claim this event.</p>
@@ -1507,16 +1686,17 @@ function EventEditor({ event, onCancel, onSave, onReload }) {
           </div>
         </Card>
       )}
-      {f.visibility === "private" && !event.id && (
+      {f.visibility === "private" && !eventId && (
         <Card className="p-4 text-sm text-ink/60">Save the event first, then a list of crew to assign will appear here.</Card>
       )}
 
-      {event.id && <ShiftManager eventId={event.id} eventVenue={f.venue} eventName={f.name} crew={crew} />}
-      {!event.id && <Card className="p-4 text-sm text-ink/60">Save the event first, then you can add shifts, subshifts, rates, and assignments.</Card>}
+      {eventId
+        ? <ShiftManager eventId={eventId} eventVenue={f.venue} eventName={f.name} eventStart={f.starts_at} eventEnd={f.ends_at} crew={crew} />
+        : <Card className="p-4 text-sm text-ink/60">Save the event first, then you can add shifts, subtasks, rates, and assignments.</Card>}
 
       <div className="flex gap-2">
-        <Btn variant="primary" onClick={() => onSave(f)}>Save event</Btn>
-        <Btn variant="ghost" onClick={onCancel}>Cancel</Btn>
+        <Btn variant="primary" onClick={handleSaveEvent} disabled={saving}>{saving ? <Loader2 className="w-4 h-4 animate-spin" /> : "Save event"}</Btn>
+        <Btn variant="ghost" onClick={onCancel}>Done</Btn>
       </div>
     </div>
   );
@@ -1527,11 +1707,13 @@ function EventEditor({ event, onCancel, onSave, onReload }) {
 /* ------------------------------------------------------------------ */
 const dtInput = (iso) => (iso ? String(iso).slice(0, 16) : "");
 
-function ShiftManager({ eventId, eventVenue, eventName, crew }) {
+function ShiftManager({ eventId, eventVenue, eventName, eventStart, eventEnd, crew }) {
   const [shifts, setShifts] = useState(null);
   const [claimsBy, setClaimsBy] = useState({});   // shift_id -> [claim w/ profile]
   const [open, setOpen] = useState({});           // shift_id -> bool
   const [busy, setBusy] = useState(false);
+  const [savingId, setSavingId] = useState(null);
+  const [savedId, setSavedId] = useState(null);
 
   const load = useCallback(async () => {
     const { data: sh } = await supabase.from("shifts").select("*, subshifts(*)")
@@ -1551,14 +1733,42 @@ function ShiftManager({ eventId, eventVenue, eventName, crew }) {
 
   async function addShift() {
     setBusy(true);
+    const prev = (shifts || [])[(shifts || []).length - 1];
     const nextOrder = (shifts || []).reduce((m, s) => Math.max(m, s.sort_order || 0), 0) + 10;
-    const { data } = await supabase.from("shifts").insert({ event_id: eventId, role_title: "New role", slots: 1, rate_visible: true, status: "active", sort_order: nextOrder }).select("*, subshifts(*)").single();
+    // New shifts copy the previous shift's details (editable) so you only change
+    // what's different; falls back to sensible defaults for the first one.
+    const seed = prev ? {
+      role_title: prev.role_title || "New role", shift_type: prev.shift_type || null,
+      location: prev.location || null, attire: prev.attire || null,
+      starts_at: prev.starts_at || null, ends_at: prev.ends_at || null,
+      slots: prev.slots || 1, public_rate: prev.public_rate ?? null,
+      rate_visible: prev.rate_visible !== false, notes: prev.notes || null,
+    } : { role_title: "New role", slots: 1, rate_visible: true };
+    const { data } = await supabase.from("shifts").insert({ event_id: eventId, status: "active", sort_order: nextOrder, ...seed }).select("*, subshifts(*)").single();
     setBusy(false);
     if (data) { setOpen((p) => ({ ...p, [data.id]: true })); await load(); }
   }
   async function updShift(id, patch) {
     setShifts((p) => p.map((s) => (s.id === id ? { ...s, ...patch } : s)));
     await supabase.from("shifts").update(patch).eq("id", id);
+  }
+  // Explicit "Save shift" — re-persists the current values and confirms + collapses.
+  async function saveShift(s) {
+    setSavingId(s.id);
+    const patch = {
+      role_title: (s.role_title || "").trim() || "Untitled role",
+      shift_type: s.shift_type || null, location: s.location || null, attire: s.attire || null,
+      starts_at: s.starts_at || null, ends_at: s.ends_at || null,
+      slots: Number(s.slots) || 1,
+      public_rate: (s.public_rate === "" || s.public_rate == null) ? null : Number(s.public_rate),
+      rate_visible: s.rate_visible !== false, notes: s.notes || null, admin_notes: s.admin_notes || null,
+    };
+    const { error } = await supabase.from("shifts").update(patch).eq("id", s.id);
+    setSavingId(null);
+    if (error) { alert(error.message); return; }
+    setShifts((p) => p.map((x) => (x.id === s.id ? { ...x, ...patch } : x)));
+    setSavedId(s.id); setTimeout(() => setSavedId((c) => (c === s.id ? null : c)), 1800);
+    setOpen((p) => ({ ...p, [s.id]: false }));
   }
   async function delShift(id) {
     if (!confirm("Delete this shift? (Use Cancel instead if crew already claimed it.)")) return;
@@ -1614,24 +1824,39 @@ function ShiftManager({ eventId, eventVenue, eventName, crew }) {
     await load();
   }
 
+  // Warn (don't block) when a shift's dates look off relative to itself or the event.
+  function shiftWarnings(s) {
+    const w = [];
+    const S = s.starts_at ? new Date(s.starts_at) : null;
+    const E = s.ends_at ? new Date(s.ends_at) : null;
+    const eS = eventStart ? new Date(eventStart) : null;
+    const eE = eventEnd ? new Date(eventEnd) : null;
+    if (S && E && E <= S) w.push("ends before it starts");
+    if (S && eS && S < eS) w.push("starts before the event");
+    if (E && eE && E > eE) w.push("ends after the event");
+    if (S && eE && S > eE) w.push("starts after the event ends");
+    return w;
+  }
+
   if (!shifts) return <Card className="p-4"><Spinner label="Loading shifts…" /></Card>;
 
   return (
     <Card className="p-4">
       <div className="flex items-center justify-between gap-2 mb-3 flex-wrap">
-        <div className="font-bold text-lg">Shifts</div>
+        <div className="font-bold text-lg">Shifts {shifts.length ? <span className="text-ink/40 font-semibold">({shifts.length})</span> : null}</div>
         <div className="flex gap-2">
           {shifts.length > 1 && <Btn variant="ghost" onClick={autoSort} className="!px-3"><ArrowDownUp className="w-4 h-4" /> Sort by time</Btn>}
           <Btn variant="canary" onClick={addShift} disabled={busy}><Plus className="w-4 h-4" /> Add shift</Btn>
         </div>
       </div>
-      {shifts.length === 0 && <div className="text-ink/50 text-sm">No shifts yet — add one above.</div>}
+      {shifts.length === 0 && <div className="text-ink/50 text-sm">No shifts yet — add one above. Each new shift copies the last one's details so you only change what's different.</div>}
       <div className="space-y-2">
         {shifts.map((s, idx) => {
           const claimants = claimsBy[s.id] || [];
           const filled = claimants.filter((c) => c.status !== "waitlisted").length;
+          const warns = shiftWarnings(s);
           return (
-            <div key={s.id} className={`border rounded-xl ${s.status === "cancelled" ? "border-red-200 bg-red-50/40" : "border-ink/10"}`}>
+            <div key={s.id} className={`border rounded-xl ${s.status === "cancelled" ? "border-red-200 bg-red-50/40" : warns.length ? "border-amber-300" : "border-ink/10"}`}>
               <div className="flex items-center gap-1 pr-2">
                 {/* up / down reorder */}
                 <div className="flex flex-col pl-1.5 py-1">
@@ -1640,7 +1865,7 @@ function ShiftManager({ eventId, eventVenue, eventName, crew }) {
                 </div>
                 <button onClick={() => setOpen((p) => ({ ...p, [s.id]: !p[s.id] }))} className="flex-1 min-w-0 flex items-center justify-between gap-2 px-2 py-2.5 text-left">
                   <div className="min-w-0">
-                    <div className="font-bold flex items-center gap-2 truncate">{s.role_title || "Untitled"}{s.shift_type ? <span className="text-ink/40 font-medium text-sm">· {s.shift_type}</span> : null} {s.status === "cancelled" && <Pill tone="red">cancelled</Pill>}</div>
+                    <div className="font-bold flex items-center gap-2 truncate">{s.role_title || "Untitled"}{s.shift_type ? <span className="text-ink/40 font-medium text-sm">· {s.shift_type}</span> : null} {s.status === "cancelled" && <Pill tone="red">cancelled</Pill>} {warns.length > 0 && s.status !== "cancelled" && <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0" />} {savedId === s.id && <span className="text-forest text-xs font-semibold inline-flex items-center gap-1 shrink-0"><Check className="w-3.5 h-3.5" /> Saved</span>}</div>
                     <div className="text-xs text-ink/50">{s.starts_at ? `${fmtDate(s.starts_at)} · ${fmtRange(s.starts_at, s.ends_at)}` : "No time set"} · {filled}/{s.slots} filled{(s.subshifts || []).length ? ` · ${s.subshifts.length} subtasks` : ""}</div>
                   </div>
                   <ChevronDown className={`w-5 h-5 shrink-0 text-ink/40 transition ${open[s.id] ? "rotate-180" : ""}`} />
@@ -1661,9 +1886,15 @@ function ShiftManager({ eventId, eventVenue, eventName, crew }) {
                   </div>
                   <div className="flex justify-end -mt-1"><DurationHint start={s.starts_at} end={s.ends_at} /></div>
                   <div className="grid grid-cols-2 gap-2">
-                    <Field label="People needed"><input type="number" min="1" className={inp} value={s.slots || 1} onChange={(e) => updShift(s.id, { slots: Number(e.target.value) })} /></Field>
+                    <Field label="People needed"><input type="number" min="1" step="1" inputMode="numeric" className={inp} value={s.slots || 1} onChange={(e) => updShift(s.id, { slots: Number(e.target.value) })} /></Field>
                     <Field label="Wage $/hr"><input type="number" step="0.01" className={inp} value={s.public_rate ?? ""} onChange={(e) => updShift(s.id, { public_rate: e.target.value ? Number(e.target.value) : null })} /></Field>
                   </div>
+                  {warns.length > 0 && (
+                    <div className="text-red-700 text-sm flex items-start gap-1.5 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+                      <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                      <span>Heads up — this shift {warns.join(", ")}. It's still saved; fix the times if that wasn't intended (overnight shifts are fine).</span>
+                    </div>
+                  )}
                   <label className="flex items-center gap-2 text-sm font-semibold">
                     <input type="checkbox" checked={s.rate_visible !== false} onChange={(e) => updShift(s.id, { rate_visible: e.target.checked })} />
                     Show this wage to crew {s.rate_visible === false && <span className="text-ink/40 font-normal">(hidden)</span>}
@@ -1715,7 +1946,11 @@ function ShiftManager({ eventId, eventVenue, eventName, crew }) {
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-2 pt-1 flex-wrap">
+                  <div className="flex items-center gap-2 pt-2 border-t border-ink/8 flex-wrap">
+                    <Btn variant="canary" onClick={() => saveShift(s)} disabled={savingId === s.id}>
+                      {savingId === s.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <><Check className="w-4 h-4" /> Save shift</>}
+                    </Btn>
+                    {savedId === s.id && <span className="text-forest text-sm font-semibold flex items-center gap-1"><Check className="w-4 h-4" /> Saved</span>}
                     <Btn variant="ghost" onClick={() => duplicate(s.id)} disabled={busy}><Copy className="w-4 h-4" /> Duplicate</Btn>
                     {s.status === "cancelled"
                       ? <Btn variant="ghost" onClick={() => reactivateShift(s)}><Check className="w-4 h-4" /> Reactivate</Btn>
