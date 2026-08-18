@@ -1138,23 +1138,39 @@ function StaffBar({ filled, needed }) {
   );
 }
 
-// Month calendar of shifts (not subtasks), each day colored by how staffed it is.
-function StaffingCalendar({ shifts }) {
+// Month calendar of shifts (not subtasks). Each day lists its actual shifts,
+// each one colored by how staffed it is and clickable through to the event —
+// a blank coloured square told you a day was busy but not what was on it.
+const staffChipClass = {
+  green: "bg-green-100 text-green-800 hover:bg-green-200",
+  yellow: "bg-amber-100 text-amber-800 hover:bg-amber-200",
+  red: "bg-red-100 text-red-700 hover:bg-red-200",
+  neutral: "bg-ink/8 text-ink/70 hover:bg-ink/15",
+};
+
+function StaffingCalendar({ shifts, onOpenShift }) {
   const [cursor, setCursor] = useState(() => { const d = new Date(); d.setDate(1); d.setHours(0, 0, 0, 0); return d; });
+  const [selDay, setSelDay] = useState(null);
+
   const byDay = {};
   shifts.forEach((s) => {
     if (!s.starts_at) return;
-    const k = dayKey(s.starts_at);
-    (byDay[k] ||= { needed: 0, filled: 0, count: 0 });
-    byDay[k].needed += s._need; byDay[k].filled += s._fill; byDay[k].count += 1;
+    (byDay[dayKey(s.starts_at)] ||= []).push(s);
   });
+  Object.values(byDay).forEach((arr) => arr.sort((a, b) => ((a.starts_at || "") < (b.starts_at || "") ? -1 : 1)));
+
   const year = cursor.getFullYear(), month = cursor.getMonth();
   const startPad = new Date(year, month, 1).getDay();
   const days = new Date(year, month + 1, 0).getDate();
   const cells = [];
   for (let i = 0; i < startPad; i++) cells.push(null);
   for (let d = 1; d <= days; d++) cells.push(new Date(year, month, d));
+  while (cells.length % 7 !== 0) cells.push(null);
   const todayK = dayKey(new Date());
+  const MAX = 3;
+  const toneOf = (s) => staffTone(s._need ? s._fill / s._need : null);
+  const selShifts = selDay ? (byDay[selDay] || []) : [];
+
   return (
     <Card className="p-3">
       <div className="flex items-center justify-between px-1 pb-2">
@@ -1167,22 +1183,65 @@ function StaffingCalendar({ shifts }) {
       </div>
       <div className="grid grid-cols-7 gap-1">
         {cells.map((d, i) => {
-          if (!d) return <div key={i} />;
+          if (!d) return <div key={i} className="min-h-[86px] rounded-lg" />;
           const k = dayKey(d);
-          const info = byDay[k];
-          const ratio = info && info.needed ? info.filled / info.needed : null;
-          const tone = info ? staffTone(ratio) : null;
-          const bg = info ? { green: "bg-green-100", yellow: "bg-amber-100", red: "bg-red-100", neutral: "bg-ink/5" }[tone] : "";
+          const items = byDay[k] || [];
+          const sel = selDay === k;
+          const isToday = k === todayK;
           return (
-            <div key={i} title={info ? `${info.filled}/${info.needed} spots filled · ${info.count} shift${info.count === 1 ? "" : "s"}` : ""}
-              className={`aspect-square rounded-lg flex flex-col items-center justify-center text-sm relative ${bg} ${k === todayK ? "ring-1 ring-ink/30" : ""}`}>
-              <span className={info ? "font-bold" : "text-ink/40"}>{d.getDate()}</span>
-              {info && <span className={`w-1.5 h-1.5 rounded-full mt-0.5 ${staffDotClass[tone]}`} />}
+            <div key={i}
+              className={`min-h-[86px] rounded-lg p-1 flex flex-col gap-0.5 border overflow-hidden transition
+                ${sel ? "border-ink bg-ink/5" : items.length ? "border-ink/15" : "border-transparent"}`}>
+              <button onClick={() => setSelDay(sel ? null : k)} className="flex items-center justify-between shrink-0" title={items.length ? `${items.length} shift${items.length === 1 ? "" : "s"}` : ""}>
+                <span className={`text-xs leading-none w-5 h-5 flex items-center justify-center rounded-full ${isToday ? "bg-ink text-white font-bold" : items.length ? "font-bold text-ink" : "text-ink/40"}`}>{d.getDate()}</span>
+              </button>
+              <div className="flex flex-col gap-0.5">
+                {items.slice(0, MAX).map((s) => (
+                  <button key={s.id} onClick={() => onOpenShift && onOpenShift(s)}
+                    title={`${s.role_title || "Shift"}${s._eventName ? " · " + s._eventName : ""} — ${s._fill}/${s._need} filled`}
+                    className={`block w-full truncate text-left text-[10px] leading-tight px-1 py-0.5 rounded transition ${staffChipClass[toneOf(s)]}`}>
+                    {fmtTime(s.starts_at) && <b className="font-bold">{fmtTime(s.starts_at)} </b>}{s.role_title || "Shift"}
+                  </button>
+                ))}
+                {items.length > MAX && (
+                  <button onClick={() => setSelDay(sel ? null : k)} className="text-[10px] font-semibold text-ink/50 px-1 text-left hover:text-ink">
+                    +{items.length - MAX} more
+                  </button>
+                )}
+              </div>
             </div>
           );
         })}
       </div>
-      <div className="flex items-center justify-center gap-3 pt-2 text-[11px] font-semibold text-ink/50">
+
+      {selDay && (
+        <div className="mt-3 border-t border-ink/10 pt-3">
+          <div className="font-bold text-sm mb-2">
+            {new Date(selDay + "T12:00:00").toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })}
+            <span className="text-ink/40 font-semibold"> · {selShifts.length} shift{selShifts.length === 1 ? "" : "s"}</span>
+          </div>
+          {selShifts.length === 0 ? <p className="text-ink/50 text-sm">Nothing scheduled.</p> : (
+            <div className="space-y-1.5">
+              {selShifts.map((s) => (
+                <button key={s.id} onClick={() => onOpenShift && onOpenShift(s)}
+                  className="w-full text-left flex items-center justify-between gap-3 rounded-lg border border-ink/10 px-3 py-2 hover:border-ink/40 transition">
+                  <div className="min-w-0">
+                    <div className="font-semibold truncate">{s.role_title || "Shift"}</div>
+                    <div className="text-xs text-ink/50 truncate">{s._eventName} · {fmtRange(s.starts_at, s.ends_at)}</div>
+                  </div>
+                  <div className="shrink-0 flex items-center gap-2">
+                    <span className={`w-2.5 h-2.5 rounded-full ${staffDotClass[toneOf(s)]}`} />
+                    <span className="text-xs font-bold text-ink/60 tabular-nums">{s._fill}/{s._need}</span>
+                    <ChevronRight className="w-4 h-4 text-ink/30" />
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="flex items-center justify-center gap-3 pt-3 text-[11px] font-semibold text-ink/50">
         <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-green-500" /> Fully staffed</span>
         <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-amber-400" /> Getting there</span>
         <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-red-500" /> Needs crew</span>
@@ -1223,7 +1282,7 @@ function AdminHome({ profile, onNav }) {
   const fillOf = (s) => (s.claims || []).filter((c) => ACTIVE_CLAIM.has(c.status)).length;
   const activeShifts = events.flatMap((e) =>
     (e.shifts || []).filter((s) => s.status !== "cancelled")
-      .map((s) => ({ ...s, _need: s.slots || 0, _fill: Math.min(fillOf(s), s.slots || 0), _eventName: e.name })));
+      .map((s) => ({ ...s, _need: s.slots || 0, _fill: Math.min(fillOf(s), s.slots || 0), _eventName: e.name, _eventId: e.id })));
   const eventStaff = (e) => {
     const sh = (e.shifts || []).filter((s) => s.status !== "cancelled");
     const needed = sh.reduce((a, s) => a + (s.slots || 0), 0);
@@ -1286,8 +1345,8 @@ function AdminHome({ profile, onNav }) {
         {/* shifts calendar (big, full width) */}
         <div>
           <div className="font-bold text-lg mb-2 flex items-center gap-2"><CalendarDays className="w-5 h-5 text-forest" /> Shifts calendar
-            <span className="text-ink/40 font-normal text-sm">— every shift, colored by how staffed it is</span></div>
-          <StaffingCalendar shifts={activeShifts} />
+            <span className="text-ink/40 font-normal text-sm">— tap any shift to open its event</span></div>
+          <StaffingCalendar shifts={activeShifts} onOpenShift={() => onNav("events")} />
         </div>
 
         {/* all events with staffing */}
