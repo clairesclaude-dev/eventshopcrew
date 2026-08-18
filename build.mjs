@@ -1,4 +1,5 @@
 import * as esbuild from "esbuild";
+import { readFileSync, writeFileSync } from "node:fs";
 import { execSync } from "node:child_process";
 
 // A short, human-readable build stamp shown to admins in the header, so it's
@@ -7,6 +8,18 @@ const stamp = new Date().toISOString().slice(0, 16).replace(/[-:]/g, "").replace
 let sha = "";
 try { sha = execSync("git rev-parse --short HEAD", { stdio: ["ignore", "pipe", "ignore"] }).toString().trim(); } catch { /* not a git checkout */ }
 const buildId = sha ? `${stamp}-${sha}` : stamp;
+
+
+// Point index.html at /app.js?v=<buildId>. Netlify overrides a custom
+// Cache-Control on JS assets, so the only reliable way to guarantee a deploy
+// is picked up immediately is to change the URL. index.html itself is always
+// revalidated, so the new URL is seen on the very next load.
+function stampHtml() {
+  const p = "public/index.html";
+  const html = readFileSync(p, "utf8");
+  const next = html.replace(/src="\/app\.js(\?v=[^"]*)?"/, `src="/app.js?v=${buildId}"`);
+  if (next !== html) { writeFileSync(p, next); console.log("stamped index.html -> /app.js?v=" + buildId); }
+}
 
 const opts = {
   entryPoints: ["src/main.jsx"],
@@ -31,5 +44,6 @@ if (process.argv.includes("--watch")) {
   console.log("watching…");
 } else {
   await esbuild.build(opts);
+  stampHtml();
   console.log("built public/app.js  (build " + buildId + ")");
 }
