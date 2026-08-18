@@ -267,6 +267,10 @@ function useAuth() {
 /* ------------------------------------------------------------------ */
 /*  Branding                                                           */
 /* ------------------------------------------------------------------ */
+// Stamped in at build time (see build.mjs). Shown to admins only, so you can
+// tell at a glance whether the browser is showing the latest deploy.
+const BUILD_ID = typeof __BUILD_ID__ !== "undefined" ? __BUILD_ID__ : "dev";
+
 function Header({ profile, onSignOut, onNav }) {
   return (
     <header className="border-b border-ink/10 bg-white sticky top-0 z-20">
@@ -279,7 +283,10 @@ function Header({ profile, onSignOut, onNav }) {
           <div className="flex items-center gap-3">
             <div className="text-right hidden sm:block">
               <div className="font-bold leading-tight">{profile.full_name || profile.email}</div>
-              <div className="text-xs text-ink/50 capitalize">{profile.role}</div>
+              <div className="text-xs text-ink/50 capitalize">
+                {profile.role}
+                {profile.role === "admin" && <span className="text-ink/30 normal-case ml-1.5" title="Deployed version">· {BUILD_ID}</span>}
+              </div>
             </div>
             <Btn variant="ghost" onClick={onSignOut}><LogOut className="w-4 h-4" /> Sign out</Btn>
           </div>
@@ -1351,13 +1358,17 @@ function Roster() {
   const [invited, setInvited] = useState([]);
   const [crew, setCrew] = useState([]);
   const [email, setEmail] = useState("");
+  const [inviteName, setInviteName] = useState("");
+  const [inviteErr, setInviteErr] = useState("");
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
     const [{ data: p }, { data: inv }, { data: appr }] = await Promise.all([
-      supabase.from("profiles").select("*").eq("status", "pending").order("created_at"),
-      supabase.from("invited_emails").select("*").order("created_at", { ascending: false }),
-      supabase.from("profiles").select("id,full_name,email,role").eq("status", "approved").order("full_name"),
+      supabase.from("profiles").select("*").eq("status", "pending").eq("pending_invite", false).order("created_at"),
+      // People added by email who haven't signed in yet. They're real crew
+      // records, so they can be put on shifts right away.
+      supabase.from("profiles").select("id,full_name,email,invited_at").eq("pending_invite", true).order("invited_at", { ascending: false }),
+      supabase.from("profiles").select("id,full_name,email,role").eq("status", "approved").eq("pending_invite", false).order("full_name"),
     ]);
     setPending(p || []); setInvited(inv || []); setCrew(appr || []);
   }, []);
@@ -1374,11 +1385,21 @@ function Roster() {
   async function invite(e) {
     e.preventDefault();
     if (!email.trim()) return;
-    setBusy(true);
-    await supabase.from("invited_emails").insert({ email: email.trim().toLowerCase() });
-    setEmail(""); setBusy(false); await load();
+    setBusy(true); setInviteErr("");
+    const { error } = await supabase.rpc("admin_invite_crew", {
+      p_email: email.trim().toLowerCase(),
+      p_name: inviteName.trim() || null,
+    });
+    setBusy(false);
+    if (error) { setInviteErr(error.message); return; }
+    setEmail(""); setInviteName(""); await load();
   }
-  async function removeInvite(em) { await supabase.from("invited_emails").delete().eq("email", em); await load(); }
+  async function removeInvite(p) {
+    if (!confirm(`Remove ${nameOf(p)} from the crew? Any shifts they were put on will be freed up.`)) return;
+    const { error } = await supabase.rpc("admin_cancel_invite", { p_id: p.id });
+    if (error) { alert(error.message); return; }
+    await load();
+  }
   async function deletePerson(p) {
     if (!confirm(`Permanently delete ${nameOf(p)} and everything of theirs (claims, hours, documents)? This can't be undone.`)) return;
     const { error } = await supabase.rpc("admin_delete_crew", { p_id: p.id });
@@ -1393,17 +1414,25 @@ function Roster() {
 
       <Card className="p-5">
         <div className="font-bold text-lg flex items-center gap-2"><UserPlus className="w-5 h-5 text-forest" /> Add crew by email</div>
-        <p className="text-ink/60 text-sm mt-1">Anyone you add is pre-approved — they skip the crew code and get straight in the first time they sign in with that email.</p>
-        <form onSubmit={invite} className="flex gap-2 mt-3">
-          <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="name@email.com" className={inp} />
-          <Btn type="submit" variant="canary" disabled={busy || !email.trim()}><Plus className="w-4 h-4" /> Add</Btn>
+        <p className="text-ink/60 text-sm mt-1">Anyone you add is pre-approved and can be put on shifts straight away — you don't have to wait for them to accept. The first time they sign in with that email, their account picks up everything you've already assigned them.</p>
+        <form onSubmit={invite} className="grid sm:grid-cols-[1fr_1fr_auto] gap-2 mt-3">
+          <input type="email" value={email} onChange={(e) => { setEmail(e.target.value); setInviteErr(""); }} placeholder="name@email.com" className={inp} />
+          <input value={inviteName} onChange={(e) => setInviteName(e.target.value)} placeholder="Name (optional)" className={inp} />
+          <Btn type="submit" variant="canary" disabled={busy || !email.trim()}>
+            {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <><Plus className="w-4 h-4" /> Add</>}
+          </Btn>
         </form>
+        {inviteErr && <p className="text-red-600 text-sm mt-2 flex items-center gap-1.5"><AlertCircle className="w-4 h-4" /> {inviteErr}</p>}
         {invited.length > 0 && (
           <div className="mt-4 space-y-1">
+            <div className="text-[11px] font-bold uppercase tracking-wide text-ink/40">Invited — hasn't signed in yet ({invited.length})</div>
             {invited.map((iv) => (
-              <div key={iv.email} className="flex items-center justify-between text-sm border-t border-ink/8 pt-2">
-                <span>{iv.email}</span>
-                <button onClick={() => removeInvite(iv.email)} className="text-ink/40 hover:text-red-600"><X className="w-4 h-4" /></button>
+              <div key={iv.id} className="flex items-center justify-between gap-2 text-sm border-t border-ink/8 pt-2">
+                <div className="min-w-0">
+                  <div className="font-semibold truncate flex items-center gap-2">{nameOf(iv)} <Pill tone="amber">Invited</Pill></div>
+                  {iv.full_name ? <div className="text-ink/50 text-xs truncate">{iv.email}</div> : null}
+                </div>
+                <button onClick={() => removeInvite(iv)} className="text-ink/40 hover:text-red-600 shrink-0" title={`Remove ${nameOf(iv)}`}><X className="w-4 h-4" /></button>
               </div>
             ))}
           </div>
@@ -1600,7 +1629,9 @@ function EventEditor({ event, onCancel, onSave, onReload }) {
 
   useEffect(() => {
     (async () => {
-      const { data: cr } = await supabase.from("profiles").select("id,full_name,email").eq("role", "crew").eq("status", "approved").order("full_name");
+      // Includes people added by email who haven't signed in yet — they carry
+      // pending_invite so the assign lists can tag them "Invited".
+      const { data: cr } = await supabase.from("profiles").select("id,full_name,email,pending_invite").eq("role", "crew").eq("status", "approved").order("full_name");
       setCrew(cr || []);
       if (eventId) {
         const { data: as } = await supabase.from("event_assignments").select("crew_id").eq("event_id", eventId);
@@ -1679,7 +1710,8 @@ function EventEditor({ event, onCancel, onSave, onReload }) {
             {crew.map((c) => (
               <label key={c.id} className="flex items-center gap-2 text-sm border border-ink/10 rounded-lg px-3 py-2 cursor-pointer">
                 <input type="checkbox" checked={!!assigned[c.id]} onChange={() => toggleAssign(c.id)} />
-                {nameOf(c)}
+                <span className="truncate">{nameOf(c)}</span>
+                {c.pending_invite && <Pill tone="amber">Invited</Pill>}
               </label>
             ))}
             {crew.length === 0 && <div className="text-ink/50 text-sm">No approved crew yet.</div>}
@@ -1838,6 +1870,22 @@ function ShiftManager({ eventId, eventVenue, eventName, eventStart, eventEnd, cr
     return w;
   }
 
+  // Same idea one level down: a subtask is checked against its own shift's
+  // window, and against the event when the shift has no times of its own.
+  function subtaskWarnings(ss, s) {
+    const w = [];
+    const S = ss.starts_at ? new Date(ss.starts_at) : null;
+    const E = ss.ends_at ? new Date(ss.ends_at) : null;
+    const pS = s.starts_at ? new Date(s.starts_at) : (eventStart ? new Date(eventStart) : null);
+    const pE = s.ends_at ? new Date(s.ends_at) : (eventEnd ? new Date(eventEnd) : null);
+    const parent = s.starts_at || s.ends_at ? "the shift" : "the event";
+    if (S && E && E <= S) w.push("ends before it starts");
+    if (S && pS && S < pS) w.push(`starts before ${parent}`);
+    if (E && pE && E > pE) w.push(`ends after ${parent}`);
+    if (S && pE && S > pE) w.push(`starts after ${parent} ends`);
+    return w;
+  }
+
   if (!shifts) return <Card className="p-4"><Spinner label="Loading shifts…" /></Card>;
 
   return (
@@ -1910,8 +1958,10 @@ function ShiftManager({ eventId, eventVenue, eventName, eventStart, eventEnd, cr
                     </div>
                     {(s.subshifts || []).length === 0 && <div className="text-ink/40 text-xs">Optional — e.g. Front Gate 4–6p, then Merch 6–10p. These belong to this shift and move with whoever is assigned to it.</div>}
                     <div className="space-y-2">
-                      {[...(s.subshifts || [])].sort((a, b) => a.sort_order - b.sort_order).map((ss) => (
-                        <div key={ss.id} className="bg-white border border-ink/10 rounded-lg p-2 space-y-2">
+                      {[...(s.subshifts || [])].sort((a, b) => a.sort_order - b.sort_order).map((ss) => {
+                        const sw = subtaskWarnings(ss, s);
+                        return (
+                        <div key={ss.id} className={`bg-white border rounded-lg p-2 space-y-2 ${sw.length ? "border-amber-300" : "border-ink/10"}`}>
                           <div className="grid grid-cols-2 gap-2">
                             <input className={inp} value={ss.title || ""} placeholder="Subtask name" onChange={(e) => updSubshift(ss.id, { title: e.target.value }, s.id)} />
                             <input className={inp} value={ss.location || ""} placeholder="Location" onChange={(e) => updSubshift(ss.id, { location: e.target.value }, s.id)} />
@@ -1920,12 +1970,19 @@ function ShiftManager({ eventId, eventVenue, eventName, eventStart, eventEnd, cr
                             <label className="block"><span className="text-[11px] font-bold uppercase tracking-wide text-ink/40">Starts</span><div className="mt-1"><DateTimeField value={ss.starts_at || ""} onChange={(v) => updSubshift(ss.id, { starts_at: v || null }, s.id)} /></div></label>
                             <label className="block"><span className="text-[11px] font-bold uppercase tracking-wide text-ink/40">Ends</span><div className="mt-1"><DateTimeField value={ss.ends_at || ""} onChange={(v) => updSubshift(ss.id, { ends_at: v || null }, s.id)} /></div></label>
                           </div>
+                          {sw.length > 0 && (
+                            <div className="text-amber-700 text-[11px] font-semibold flex items-start gap-1.5">
+                              <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-px" />
+                              <span>This subtask {sw.join(" · ")}. Saved anyway — just double-check the times.</span>
+                            </div>
+                          )}
                           <div className="flex items-center justify-between">
                             <DurationHint start={ss.starts_at} end={ss.ends_at} />
                             <button className="text-red-600 text-xs flex items-center gap-1" onClick={() => delSubshift(ss.id)}><Trash2 className="w-3.5 h-3.5" /> Remove subtask</button>
                           </div>
                         </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   </div>
 
@@ -1936,9 +1993,10 @@ function ShiftManager({ eventId, eventVenue, eventName, eventStart, eventEnd, cr
                       {crew.map((c) => {
                         const on = claimants.some((x) => x.crew_id === c.id);
                         return (
-                          <label key={c.id} className="flex items-center gap-2 text-sm border border-ink/10 rounded-lg px-2.5 py-1.5 cursor-pointer">
+                          <label key={c.id} className={`flex items-center gap-2 text-sm border rounded-lg px-2.5 py-1.5 cursor-pointer ${c.pending_invite ? "border-amber-200 bg-amber-50/50" : "border-ink/10"}`}>
                             <input type="checkbox" checked={on} onChange={(e) => toggleAssign(s.id, c.id, e.target.checked)} />
-                            {nameOf(c)}
+                            <span className="truncate">{nameOf(c)}</span>
+                            {c.pending_invite && <Pill tone="amber">Invited</Pill>}
                           </label>
                         );
                       })}
@@ -2208,7 +2266,7 @@ function AdminHours() {
         .select("*, profiles!hours_entries_crew_id_fkey(full_name,email), events(name), shifts(role_title)")
         .order("check_in_at", { ascending: false, nullsFirst: false })
         .order("created_at", { ascending: false }),
-      supabase.from("profiles").select("id,full_name,email").eq("status", "approved").order("full_name"),
+      supabase.from("profiles").select("id,full_name,email,pending_invite").eq("status", "approved").order("full_name"),
       supabase.from("events").select("id,name").order("starts_at", { ascending: false }),
     ]);
     setRows(h || []); setCrew(c || []); setEvents(e || []);
@@ -2304,7 +2362,7 @@ function AdminHours() {
           <div className="sm:col-span-2"><Field label="Crew">
             <select className={inp} value={form.crew_id} onChange={(e) => setForm((p) => ({ ...p, crew_id: e.target.value }))} required>
               <option value="">Select…</option>
-              {crew.map((c) => <option key={c.id} value={c.id}>{nameOf(c)}</option>)}
+              {crew.map((c) => <option key={c.id} value={c.id}>{nameOf(c)}{c.pending_invite ? " (invited)" : ""}</option>)}
             </select></Field></div>
           <div className="sm:col-span-2"><Field label="Event">
             <select className={inp} value={form.event_id} onChange={(e) => setForm((p) => ({ ...p, event_id: e.target.value }))}>
@@ -2320,7 +2378,7 @@ function AdminHours() {
       <div className="flex items-center gap-2 flex-wrap">
         <span className="text-ink/50 text-sm flex items-center gap-1"><Filter className="w-4 h-4" /> Filter</span>
         <select className="border border-ink/20 rounded-lg px-2 py-1.5 text-sm" value={fCrew} onChange={(e) => setFCrew(e.target.value)}>
-          <option value="">All crew</option>{crew.map((c) => <option key={c.id} value={c.id}>{nameOf(c)}</option>)}
+          <option value="">All crew</option>{crew.map((c) => <option key={c.id} value={c.id}>{nameOf(c)}{c.pending_invite ? " (invited)" : ""}</option>)}
         </select>
         <select className="border border-ink/20 rounded-lg px-2 py-1.5 text-sm" value={fEvent} onChange={(e) => setFEvent(e.target.value)}>
           <option value="">All events</option>{events.map((ev) => <option key={ev.id} value={ev.id}>{ev.name}</option>)}
